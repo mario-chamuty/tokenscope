@@ -142,8 +142,10 @@ jobs:
             mount="$(mktemp -d)"
             hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -readonly
             codesign --verify --deep --strict --verbose=2 "$mount/TokenScope.app"
-            codesign -dv "$mount/TokenScope.app" 2>&1 | grep -q "Authority=TokenScope Self-Signed"
+            details="$(codesign -dvv "$mount/TokenScope.app" 2>&1)"
+            echo "$details"
             hdiutil detach "$mount"
+            echo "$details" | grep -q "Authority=TokenScope Self-Signed"
           done
       - uses: actions/upload-artifact@v4
         with:
