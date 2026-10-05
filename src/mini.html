@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>TokenScope</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: #08090d;
+      color: #e8eaf0;
+      overflow: hidden;
+      user-select: none;
+      border-radius: 8px;
+      border: 1px solid #1c2035;
+    }
+
+    /* ─── Compact layout (1 line) ─── */
+    .layout-compact {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      height: 50px;
+      padding: 0 6px 0 12px;
+      -webkit-app-region: drag;
+      cursor: move;
+      white-space: nowrap;
+    }
+
+    .layout-compact .c-brand {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-right: 10px;
+      flex-shrink: 0;
+      -webkit-app-region: no-drag;
+      cursor: pointer;
+      position: relative;
+    }
+
+    .layout-compact .c-dot {
+      width: 5px; height: 5px;
+      border-radius: 50%;
+      background: #34d399;
+      box-shadow: 0 0 5px #34d399;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.3 } }
+
+    .layout-compact .c-name {
+      font-family: 'Chakra Petch', sans-serif;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      color: #fb923c;
+      text-transform: uppercase;
+    }
+    .layout-compact .c-name:hover { color: #fbbf24; }
+
+    .layout-compact .c-name.has-project {
+      color: #4facfe;
+      max-width: 100px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .layout-compact .c-name.has-project:hover { color: #7cc4fe; }
+
+    .layout-compact .c-sep {
+      width: 1px;
+      height: 20px;
+      background: #1c2035;
+      margin: 0 5px;
+      flex-shrink: 0;
+    }
+
+    .layout-compact .c-item {
+      display: flex;
+      align-items: baseline;
+      gap: 3px;
+      margin: 0 4px;
+      flex-shrink: 0;
+    }
+
+    .layout-compact .c-label {
+      font-size: 7px;
+      font-weight: 500;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: #4a5070;
+    }
+
+    .layout-compact .c-val {
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .layout-compact .c-close {
+      -webkit-app-region: no-drag;
+      cursor: pointer;
+      background: none;
+      border: none;
+      color: #2a3050;
+      font-size: 16px;
+      margin-left: auto;
+      padding: 6px 8px;
+      border-radius: 3px;
+      transition: color 0.15s;
+      flex-shrink: 0;
+      position: relative;
+      z-index: 100;
+    }
+    .layout-compact .c-close:hover { color: #f87171; background: rgba(248,113,113,0.1); }
+
+    /* ─── Expanded layout ─── */
+    .layout-expanded {
+      padding: 10px 14px 8px;
+      -webkit-app-region: drag;
+      cursor: move;
+      min-height: 100px;
+    }
+
+    .layout-expanded .e-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .layout-expanded .e-brand {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      -webkit-app-region: no-drag;
+      cursor: pointer;
+      position: relative;
+    }
+
+    .layout-expanded .e-dot {
+      width: 5px; height: 5px;
+      border-radius: 50%;
+      background: #34d399;
+      box-shadow: 0 0 5px #34d399;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    .layout-expanded .e-name {
+      font-family: 'Chakra Petch', sans-serif;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      color: #fb923c;
+      text-transform: uppercase;
+    }
+    .layout-expanded .e-name:hover { color: #fbbf24; }
+
+    .layout-expanded .e-name.has-project {
+      color: #4facfe;
+      max-width: 140px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .layout-expanded .e-name.has-project:hover { color: #7cc4fe; }
+
+    .layout-expanded .e-active-row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-top: 4px;
+      padding-top: 4px;
+      border-top: 1px solid #1c2035;
+    }
+
+    .layout-expanded .e-active-label {
+      font-size: 7px;
+      font-weight: 500;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: #4a5070;
+    }
+
+    .layout-expanded .e-active-val {
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .layout-expanded .e-close {
+      -webkit-app-region: no-drag;
+      cursor: pointer;
+      background: none;
+      border: none;
+      color: #2a3050;
+      font-size: 16px;
+      padding: 6px 8px;
+      border-radius: 3px;
+      transition: color 0.15s;
+      position: relative;
+      z-index: 100;
+    }
+    .layout-expanded .e-close:hover { color: #f87171; background: rgba(248,113,113,0.1); }
+
+    .layout-expanded .e-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr 1fr;
+      gap: 2px 12px;
+    }
+
+    .layout-expanded .e-label {
+      font-size: 7px;
+      font-weight: 500;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: #4a5070;
+    }
+
+    .layout-expanded .e-val {
+      font-size: 17px;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+
+    .v-cost   { color: #34d399; }
+    .v-tokens { color: #4facfe; }
+    .v-sess   { color: #c084fc; }
+    .v-total  { color: #fb923c; }
+
+    .layout-compact .c-close:active,
+    .layout-expanded .e-close:active { color: #e8eaf0; }
+
+    .hidden { display: none !important; }
+
+  </style>
+</head>
+<body>
+
+  <!-- Compact layout (default) -->
+  <div id="compact" class="layout-compact">
+    <div class="c-brand" id="c-brand">
+      <div class="c-dot" id="c-dot"></div>
+      <span class="c-name" id="c-name">TokenScope</span>
+    </div>
+    <div class="c-sep"></div>
+    <div class="c-item">
+      <span class="c-label">Cost</span>
+      <span class="c-val v-cost" id="c-cost">--</span>
+    </div>
+    <div class="c-sep"></div>
+    <div class="c-item">
+      <span class="c-label">Tok</span>
+      <span class="c-val v-tokens" id="c-tokens">--</span>
+    </div>
+    <div class="c-sep"></div>
+    <div class="c-item">
+      <span class="c-label">Sess</span>
+      <span class="c-val v-sess" id="c-sessions">--</span>
+    </div>
+    <div class="c-sep"></div>
+    <div class="c-item">
+      <span class="c-label">Total</span>
+      <span class="c-val v-total" id="c-total">--</span>
+    </div>
+    <button class="c-close" id="c-close">&times;</button>
+  </div>
+
+  <!-- Expanded layout -->
+  <div id="expanded" class="layout-expanded hidden">
+    <div class="e-top">
+      <div class="e-brand" id="e-brand">
+        <div class="e-dot" id="e-dot"></div>
+        <span class="e-name" id="e-name">TokenScope</span>
+      </div>
+      <button class="e-close" id="e-close">&times;</button>
+    </div>
+    <div class="e-grid">
+      <div>
+        <div class="e-label">Today Cost</div>
+        <div class="e-val v-cost" id="e-cost">--</div>
+      </div>
+      <div>
+        <div class="e-label">Tokens</div>
+        <div class="e-val v-tokens" id="e-tokens">--</div>
+      </div>
+      <div>
+        <div class="e-label">Sessions</div>
+        <div class="e-val v-sess" id="e-sessions">--</div>
+      </div>
+      <div>
+        <div class="e-label">All-Time</div>
+        <div class="e-val v-total" id="e-total">--</div>
+      </div>
+    </div>
+    <div class="e-active-row hidden" id="e-active">
+      <span class="e-active-label">Session</span>
+      <span class="e-active-val v-cost" id="e-sess-cost">--</span>
+      <span class="e-active-label">Tok</span>
+      <span class="e-active-val v-tokens" id="e-sess-tokens">--</span>
+      <span class="e-active-label">Turns</span>
+      <span class="e-active-val v-sess" id="e-sess-turns">--</span>
+    </div>
+  </div>
+
+  <script src="js/mini.js"></script>
+</body>
+</html>

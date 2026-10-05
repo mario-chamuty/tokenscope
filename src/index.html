@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TokenScope</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+
+  <!-- Scan progress overlay -->
+  <div id="scan-overlay" class="scan-overlay hidden">
+    <div class="scan-card">
+      <div class="scan-pulse"></div>
+      <div class="scan-content">
+        <div class="scan-title">SCANNING SESSION DATA</div>
+        <div class="scan-detail" id="scan-detail">Discovering files...</div>
+        <div class="scan-bar-track">
+          <div class="scan-bar-fill" id="scan-fill"></div>
+        </div>
+        <div class="scan-meta">
+          <span id="scan-files">0 / 0 files</span>
+          <span id="scan-turns">0 turns found</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cost alert banner -->
+  <div id="cost-alert" class="cost-alert hidden">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    <span id="cost-alert-text">Daily cost threshold exceeded!</span>
+    <button id="cost-alert-close" class="alert-close">&times;</button>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button id="settings-close" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="setting-group">
+          <label class="setting-label">Daily Cost Threshold ($)</label>
+          <input type="number" id="set-threshold" class="setting-input" step="0.01" min="0" placeholder="0 = disabled" />
+          <span class="setting-hint">Alert when today's cost exceeds this amount. 0 = disabled.</span>
+        </div>
+
+        <h3 class="setting-section">Pricing ($ per million tokens)</h3>
+        <div class="pricing-hint">Rates come from Anthropic's official Claude API pricing table. New models and price changes are merged automatically; historical model rows are retained. Cache Create uses the 5-minute write rate.</div>
+        <div class="pricing-auto-row">
+          <label class="pricing-auto-toggle">
+            <input type="checkbox" id="set-auto-pricing" checked />
+            <span>Automatically update from Claude API pricing</span>
+          </label>
+          <button type="button" id="pricing-refresh" class="action-btn">Check now</button>
+        </div>
+        <div id="pricing-update-status" class="pricing-update-status"></div>
+        <div class="pricing-grid-v2" id="pricing-grid-v2">
+          <div class="pricing-header-v2">Model</div>
+          <div class="pricing-header-v2">Input</div>
+          <div class="pricing-header-v2">Output</div>
+          <div class="pricing-header-v2">Cache Read</div>
+          <div class="pricing-header-v2">Cache Create</div>
+          <!-- Rows injected by JS -->
+        </div>
+        <div class="pricing-fallback">
+          <div class="pricing-header-v2" style="grid-column: 1 / -1; margin-top:8px">Fallback (unknown model)</div>
+          <div class="pricing-fallback-grid">
+            <span class="pricing-label-v2">Any other</span>
+            <input type="number" id="pr-fb-input" class="setting-input sm" step="0.01" />
+            <input type="number" id="pr-fb-output" class="setting-input sm" step="0.01" />
+            <input type="number" id="pr-fb-cache-read" class="setting-input sm" step="0.01" />
+            <input type="number" id="pr-fb-cache-creation" class="setting-input sm" step="0.01" />
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button id="settings-reset" class="action-btn">Reset Defaults</button>
+          <button id="settings-save" class="action-btn primary">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manage Projects Modal -->
+  <div id="projects-modal" class="modal-overlay hidden">
+    <div class="modal-card" style="width:720px">
+      <div class="modal-header">
+        <h2>Manage Projects</h2>
+        <button id="projects-close" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="projects-hint">Rename a project to give it a friendlier label. The underlying folder isn't moved — only the display name in TokenScope changes. Renames persist across rescans.</p>
+        <div class="projects-list" id="projects-list">
+          <div class="projects-empty">Loading projects...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- About Modal -->
+  <div id="about-modal" class="modal-overlay hidden">
+    <div class="modal-card" style="width:480px">
+      <div class="modal-header">
+        <h2>About TokenScope</h2>
+        <button id="about-close" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="about-hero">
+          <img src="icons/icon-32.png" width="48" height="48" alt="TokenScope" style="border-radius:8px" />
+          <div>
+            <div class="about-title">TokenScope</div>
+            <div class="about-version" id="about-version"></div>
+          </div>
+        </div>
+        <p class="about-desc">AI Coding Token Usage Dashboard. Monitor and visualize token usage, costs, and usage patterns across projects.</p>
+
+        <div class="about-section">Developer</div>
+        <div class="about-dev">
+          <strong>Version Two s.r.o.</strong><br>
+          Zamocka 6619/3, Bratislava, Slovakia<br>
+          <a href="mailto:info@versiontwo.sk" class="about-link">info@versiontwo.sk</a><br>
+          <a href="https://www.versiontwo.sk" class="about-link">www.versiontwo.sk</a>
+        </div>
+
+        <div class="about-section">Open Source Licenses</div>
+        <div class="about-licenses">
+          <div class="license-item">
+            <span class="license-name">Tauri</span>
+            <span class="license-ver">v2.10.3</span>
+            <span class="license-type">MIT / Apache-2.0</span>
+          </div>
+          <div class="license-item">
+            <span class="license-name">rusqlite</span>
+            <span class="license-ver">v0.31.0</span>
+            <span class="license-type">MIT</span>
+          </div>
+          <div class="license-item">
+            <span class="license-name">serde</span>
+            <span class="license-ver">v1.0.228</span>
+            <span class="license-type">MIT / Apache-2.0</span>
+          </div>
+          <div class="license-item">
+            <span class="license-name">serde_json</span>
+            <span class="license-ver">v1.0.149</span>
+            <span class="license-type">MIT / Apache-2.0</span>
+          </div>
+          <div class="license-item">
+            <span class="license-name">chrono</span>
+            <span class="license-ver">v0.4.44</span>
+            <span class="license-type">MIT / Apache-2.0</span>
+          </div>
+          <div class="license-item">
+            <span class="license-name">dirs</span>
+            <span class="license-ver">v5.0.1</span>
+            <span class="license-type">MIT / Apache-2.0</span>
+          </div>
+          <div class="license-item">
+            <span class="license-name">tauri-plugin-opener</span>
+            <span class="license-ver">v2.5.3</span>
+            <span class="license-type">MIT / Apache-2.0</span>
+          </div>
+          <div class="license-item">
+            <span class="license-name">Chart.js</span>
+            <span class="license-ver">v4.4.7</span>
+            <span class="license-type">MIT</span>
+          </div>
+          <div class="license-item">
+            <span class="license-name">SQLite</span>
+            <span class="license-ver">(bundled)</span>
+            <span class="license-type">Public Domain</span>
+          </div>
+        </div>
+
+        <div class="about-footer">&copy; 2026 Version Two s.r.o. All rights reserved.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Header -->
+  <header>
+    <div class="header-brand">
+      <div class="brand-icon">
+        <img src="icons/icon-32.png" width="22" height="22" alt="TokenScope" style="border-radius:4px" />
+      </div>
+      <h1>TokenScope</h1>
+      <span class="brand-tag">AI Usage Monitor</span>
+    </div>
+    <div class="header-meta">
+      <div class="live-dot" id="live-dot"></div>
+      <span id="last-updated" class="meta-text"></span>
+      <span id="refresh-countdown" class="meta-countdown"></span>
+    </div>
+  </header>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <span class="toolbar-label">MODEL</span>
+      <div class="toggle-group" id="model-toggles">
+        <button type="button" class="toggle active" data-model="fable" aria-pressed="true"><span class="toggle-dot fable"></span>Fable</button>
+        <button type="button" class="toggle active" data-model="opus" aria-pressed="true"><span class="toggle-dot opus"></span>Opus</button>
+        <button type="button" class="toggle active" data-model="sonnet" aria-pressed="true"><span class="toggle-dot sonnet"></span>Sonnet</button>
+        <button type="button" class="toggle active" data-model="haiku" aria-pressed="true"><span class="toggle-dot haiku"></span>Haiku</button>
+        <button type="button" class="toggle active" data-model="mythos" aria-pressed="true"><span class="toggle-dot mythos"></span>Mythos</button>
+        <button type="button" class="toggle active" data-model="other" aria-pressed="true"><span class="toggle-dot other"></span>Other</button>
+      </div>
+    </div>
+
+    <div class="toolbar-group" id="tier-group" style="display:none">
+      <span class="toolbar-label">TIER</span>
+      <span class="tier-badge" id="tier-badge"></span>
+    </div>
+
+    <div class="toolbar-group">
+      <span class="toolbar-label">PROJECT</span>
+      <div class="project-filter-wrap">
+        <select id="project-filter" class="project-select">
+          <option value="">All Projects</option>
+        </select>
+        <button id="btn-manage-projects" class="project-filter-edit" title="Manage Projects (rename)">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="toolbar-spacer"></div>
+
+    <div class="toolbar-group">
+      <span class="toolbar-label">RANGE</span>
+      <div class="toggle-group" id="range-toggles">
+        <button class="toggle" data-range="today">Today</button>
+        <button class="toggle" data-range="7d">7d</button>
+        <button class="toggle active" data-range="30d">30d</button>
+        <button class="toggle" data-range="90d">90d</button>
+        <button class="toggle" data-range="all">All</button>
+      </div>
+    </div>
+
+    <div class="toolbar-spacer"></div>
+
+    <!-- Export dropdown -->
+    <div class="dropdown" id="export-dropdown">
+      <button class="action-btn" id="btn-export">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Export
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div class="dropdown-menu" id="export-menu">
+        <button class="dropdown-item" id="act-report">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          Markdown Report
+        </button>
+        <button class="dropdown-item" id="act-csv">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+          CSV Export
+        </button>
+        <button class="dropdown-item" id="act-pdf">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+          PDF Report
+        </button>
+      </div>
+    </div>
+
+    <!-- Tools dropdown -->
+    <div class="dropdown" id="tools-dropdown">
+      <button class="action-btn" id="btn-tools">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        Tools
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div class="dropdown-menu" id="tools-menu">
+        <button class="dropdown-item" id="act-mini">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          Mini Monitor
+        </button>
+        <button class="dropdown-item" id="act-new-mini">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="12" y1="7" x2="12" y2="13"/><line x1="9" y1="10" x2="15" y2="10"/></svg>
+          New Mini Monitor
+        </button>
+        <button class="dropdown-item" id="act-rescan">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Full Rescan
+        </button>
+        <button class="dropdown-item" id="act-open-data">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          Open Data Folder
+        </button>
+        <button class="dropdown-item" id="act-active">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Active Sessions
+        </button>
+        <button class="dropdown-item" id="act-manage-projects">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><path d="M12 11v6M9 14h6"/></svg>
+          Manage Projects
+        </button>
+        <button class="dropdown-item" id="act-settings">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/></svg>
+          Settings
+        </button>
+        <button class="dropdown-item" id="act-about">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          About
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats Ribbon -->
+  <div class="stats-ribbon">
+    <div class="stat">
+      <div class="stat-val" id="stat-sessions">--</div>
+      <div class="stat-lbl">Sessions</div>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat">
+      <div class="stat-val" id="stat-turns">--</div>
+      <div class="stat-lbl">Turns</div>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat">
+      <div class="stat-val accent-blue" id="stat-input">--</div>
+      <div class="stat-lbl">Input Tokens</div>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat">
+      <div class="stat-val accent-cyan" id="stat-output">--</div>
+      <div class="stat-lbl">Output Tokens</div>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat">
+      <div class="stat-val accent-amber" id="stat-cache-read">--</div>
+      <div class="stat-lbl">Cache Read</div>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat">
+      <div class="stat-val accent-red" id="stat-cache-creation">--</div>
+      <div class="stat-lbl">Cache Write</div>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat">
+      <div class="stat-val accent-purple" id="stat-cache-hit">--</div>
+      <div class="stat-lbl">Cache Hit %</div>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat cost-stat">
+      <div class="stat-val accent-green" id="stat-cost">--</div>
+      <div class="stat-lbl">Est. Cost</div>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <main>
+    <!-- Daily Chart -->
+    <section class="panel panel-wide">
+      <div class="panel-header">
+        <h2>Daily Token Usage & Cost</h2>
+        <div class="panel-legend" id="daily-legend">
+          <span class="legend-item"><span class="legend-swatch" style="background:#4facfe"></span>Input</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#00f2fe"></span>Output</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#fbbf24"></span>Cache Read</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#f87171"></span>Cache Write</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#34d399;border-radius:50%"></span>Cost</span>
+        </div>
+      </div>
+      <div class="chart-wrap chart-tall">
+        <canvas id="dailyChart"></canvas>
+      </div>
+    </section>
+
+    <!-- Two-column row -->
+    <div class="panel-row">
+      <section class="panel">
+        <div class="panel-header"><h2>By Model</h2></div>
+        <div class="chart-wrap chart-mid">
+          <canvas id="modelChart"></canvas>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header"><h2>Top Projects</h2></div>
+        <div class="chart-wrap chart-mid">
+          <canvas id="projectChart"></canvas>
+        </div>
+      </section>
+    </div>
+
+    <!-- Active Sessions (hidden by default) -->
+    <section class="panel panel-wide hidden" id="active-panel">
+      <div class="panel-header">
+        <h2>Active Sessions</h2>
+        <button class="action-btn" id="active-close" style="font-size:10px;padding:3px 10px">Close</button>
+      </div>
+      <div class="table-scroll" style="max-height:200px">
+        <table>
+          <thead><tr><th>Session</th><th>Project</th><th>Model</th><th>Last Activity</th></tr></thead>
+          <tbody id="active-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Advanced Stats -->
+    <section class="panel panel-wide" id="advanced-panel">
+      <div class="panel-header">
+        <h2>Advanced Breakdown</h2>
+        <span class="subagent-indicator" id="advanced-summary"></span>
+        <div class="panel-header-right">
+          <label class="advanced-range-label">Range</label>
+          <select id="advanced-range" class="advanced-range-select">
+            <option value="all" selected>All time</option>
+            <option value="today">Today</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="90d">Last 90 days</option>
+          </select>
+        </div>
+      </div>
+      <div class="advanced-grid">
+        <!-- Output composition -->
+        <div class="advanced-card">
+          <div class="advanced-card-title">Output Composition</div>
+          <div class="compo-total-line">
+            <span class="compo-total-label">Output tokens (API)</span>
+            <span class="compo-total-val" id="compo-output-total">--</span>
+          </div>
+          <div class="advanced-bars" id="composition-bars">
+            <div class="compo-row">
+              <span class="compo-label">Text</span>
+              <div class="compo-track"><div class="compo-fill compo-text" id="compo-text-fill"></div></div>
+              <span class="compo-val" id="compo-text-val">--</span>
+            </div>
+            <div class="compo-row">
+              <span class="compo-label">Tool use</span>
+              <div class="compo-track"><div class="compo-fill compo-tool" id="compo-tool-fill"></div></div>
+              <span class="compo-val" id="compo-tool-val">--</span>
+            </div>
+            <div class="compo-row">
+              <span class="compo-label">Thinking*</span>
+              <div class="compo-track"><div class="compo-fill compo-thinking" id="compo-thinking-fill"></div></div>
+              <span class="compo-val" id="compo-thinking-val">--</span>
+            </div>
+          </div>
+          <div class="compo-note">
+            Text/tool tokens estimated from JSONL chars (~4 chars/tok); thinking is the residual
+            vs. API <code>output_tokens</code>. Thinking text itself isn't logged — only the signature.
+          </div>
+          <div class="compo-subline">
+            <span id="compo-thinking-turns">--</span> of <span id="compo-total-turns">--</span> turns used extended thinking
+          </div>
+        </div>
+
+        <!-- Input / cache composition -->
+        <div class="advanced-card">
+          <div class="advanced-card-title">Input &amp; Cache</div>
+          <div class="compo-total-line">
+            <span class="compo-total-label">Total input billed</span>
+            <span class="compo-total-val" id="cache-total-val">--</span>
+          </div>
+          <div class="advanced-bars">
+            <div class="compo-row">
+              <span class="compo-label">Fresh</span>
+              <div class="compo-track"><div class="compo-fill compo-input-fresh" id="cache-fresh-fill"></div></div>
+              <span class="compo-val" id="cache-fresh-val">--</span>
+            </div>
+            <div class="compo-row">
+              <span class="compo-label">Cache write</span>
+              <div class="compo-track"><div class="compo-fill compo-input-write" id="cache-write-fill"></div></div>
+              <span class="compo-val" id="cache-write-val">--</span>
+            </div>
+            <div class="compo-row">
+              <span class="compo-label">Cache read</span>
+              <div class="compo-track"><div class="compo-fill compo-input-read" id="cache-read-fill"></div></div>
+              <span class="compo-val" id="cache-read-val">--</span>
+            </div>
+          </div>
+          <div class="compo-subline">Higher cache-read = more efficient reuse. Cache writes are paid once.</div>
+        </div>
+
+        <!-- Interaction counters -->
+        <div class="advanced-card">
+          <div class="advanced-card-title">Interactions</div>
+          <div class="advanced-kv">
+            <div class="kv-row"><span class="kv-k">Questions asked</span><span class="kv-v" id="stat-ask-user">--</span></div>
+            <div class="kv-row"><span class="kv-k">Plan mode used</span><span class="kv-v" id="stat-plan-mode">--</span></div>
+            <div class="kv-row"><span class="kv-k">Denied calls</span><span class="kv-v accent-red" id="stat-denied">--</span></div>
+            <div class="kv-row"><span class="kv-k">Subagents spawned</span><span class="kv-v" id="sub-spawn">--</span></div>
+            <div class="kv-row"><span class="kv-k">Subagent turns</span><span class="kv-v" id="sub-turns">--</span></div>
+            <div class="kv-row"><span class="kv-k">Subagent cost</span><span class="kv-v accent-green" id="sub-cost">--</span></div>
+          </div>
+          <!-- Hidden legacy fields so older JS paths don't NPE if stale bundle runs. -->
+          <span id="sub-input" style="display:none"></span>
+          <span id="sub-output" style="display:none"></span>
+        </div>
+
+        <!-- Skills -->
+        <div class="advanced-card">
+          <div class="advanced-card-title">Skills</div>
+          <div class="advanced-table-wrap">
+            <table class="advanced-mini-table">
+              <thead><tr><th>Skill</th><th class="num">Invocations</th></tr></thead>
+              <tbody id="skill-body"><tr><td colspan="2" class="empty">No skill invocations in range</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Denied tools breakdown -->
+        <div class="advanced-card">
+          <div class="advanced-card-title">Denied Tool Calls</div>
+          <div class="advanced-table-wrap">
+            <table class="advanced-mini-table">
+              <thead><tr><th>Tool</th><th>Type</th><th class="num">Denials</th></tr></thead>
+              <tbody id="denied-body"><tr><td colspan="3" class="empty">No denied calls in range</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Full-width tool & MCP tables -->
+      <div class="panel-row" style="margin-top:16px">
+        <div class="panel" style="flex:1;padding:12px">
+          <div class="panel-header"><h2 style="font-size:11px">Top Tools</h2></div>
+          <div class="advanced-table-wrap">
+            <table class="advanced-mini-table">
+              <thead><tr><th>Tool</th><th>Type</th><th class="num">Calls</th><th class="num">Input Chars</th></tr></thead>
+              <tbody id="tool-body"><tr><td colspan="4" class="empty">No tool calls in range</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel" style="flex:1;padding:12px">
+          <div class="panel-header"><h2 style="font-size:11px">MCP Servers</h2></div>
+          <div class="advanced-table-wrap">
+            <table class="advanced-mini-table">
+              <thead><tr><th>Server</th><th class="num">Tools</th><th class="num">Calls</th><th class="num">Input Chars</th></tr></thead>
+              <tbody id="mcp-body"><tr><td colspan="4" class="empty">No MCP calls in range</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Category totals + Subagent types -->
+      <div class="panel-row" style="margin-top:16px">
+        <div class="panel" style="flex:1;padding:12px">
+          <div class="panel-header"><h2 style="font-size:11px">By Category</h2></div>
+          <div class="advanced-table-wrap">
+            <table class="advanced-mini-table">
+              <thead><tr><th>Category</th><th class="num">Calls</th><th class="num">Turns</th><th class="num">Input Chars</th></tr></thead>
+              <tbody id="cat-body"><tr><td colspan="4" class="empty">No tool calls in range</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel" style="flex:1;padding:12px">
+          <div class="panel-header"><h2 style="font-size:11px">Subagent Types</h2></div>
+          <div class="advanced-table-wrap">
+            <table class="advanced-mini-table">
+              <thead><tr><th>Type</th><th class="num">Spawns</th></tr></thead>
+              <tbody id="subtype-body"><tr><td colspan="2" class="empty">No subagent spawns in range</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Top bash / files / domains -->
+      <div class="panel-row" style="margin-top:16px">
+        <div class="panel" style="flex:1;padding:12px">
+          <div class="panel-header"><h2 style="font-size:11px">Top Bash Commands</h2></div>
+          <div class="advanced-table-wrap">
+            <table class="advanced-mini-table">
+              <thead><tr><th>Command</th><th class="num">Calls</th></tr></thead>
+              <tbody id="bash-body"><tr><td colspan="2" class="empty">No bash invocations in range</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel" style="flex:1;padding:12px">
+          <div class="panel-header"><h2 style="font-size:11px">Top Files Touched</h2></div>
+          <div class="advanced-table-wrap">
+            <table class="advanced-mini-table">
+              <thead><tr><th>File</th><th class="num">Ops</th></tr></thead>
+              <tbody id="files-body"><tr><td colspan="2" class="empty">No file operations in range</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel" style="flex:1;padding:12px">
+          <div class="panel-header"><h2 style="font-size:11px">Top Fetched Hosts</h2></div>
+          <div class="advanced-table-wrap">
+            <table class="advanced-mini-table">
+              <thead><tr><th>Host</th><th class="num">Fetches</th></tr></thead>
+              <tbody id="domains-body"><tr><td colspan="2" class="empty">No WebFetch calls in range</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Sessions Table -->
+    <section class="panel panel-wide">
+      <div class="panel-header">
+        <h2>Recent Sessions</h2>
+        <span class="subagent-indicator" id="subagent-count"></span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th class="sortable" data-sort="session_id">Session</th>
+              <th class="sortable" data-sort="project">Project</th>
+              <th class="sortable" data-sort="last_active">Last Active</th>
+              <th class="sortable" data-sort="duration_minutes">Duration</th>
+              <th class="sortable" data-sort="model">Model</th>
+              <th class="num sortable" data-sort="turns">Turns</th>
+              <th class="num sortable" data-sort="input_tokens">Input</th>
+              <th class="num sortable" data-sort="output_tokens">Output</th>
+              <th class="num sortable" data-sort="est_cost">Cost</th>
+              <th style="width:20px"></th>
+            </tr>
+          </thead>
+          <tbody id="sessions-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="lib/chart.umd.min.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
