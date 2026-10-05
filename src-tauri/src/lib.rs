@@ -468,3 +468,73 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenscope-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn imports_legacy_database_settings_and_backup() {
+        let root = temp_root("legacy-import");
+        let legacy = root.join("com.versiontwo.tokscope");
+        let current = root.join("sk.versiontwo.tokenscope");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+
+        {
+            let db = Database::new(legacy.join("tokscope.db")).unwrap();
+            db.meta_set("data_schema_version", "6").unwrap();
+        }
+        std::fs::write(legacy.join("settings.json"), "{\"a\":1}").unwrap();
+        std::fs::write(legacy.join("tokscope.db.pre-v6.bak"), "bak").unwrap();
+
+        import_legacy_data(&current).unwrap();
+
+        let db = Database::new(current.join("tokenscope.db")).unwrap();
+        assert_eq!(db.meta_get("data_schema_version").unwrap().as_deref(), Some("6"));
+        drop(db);
+        assert_eq!(std::fs::read_to_string(current.join("settings.json")).unwrap(), "{\"a\":1}");
+        assert!(current.join("tokenscope.db.pre-v6.bak").exists());
+        assert!(legacy.join("tokscope.db").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn does_not_overwrite_existing_database() {
+        let root = temp_root("legacy-skip");
+        let legacy = root.join("com.versiontwo.tokscope");
+        let current = root.join("sk.versiontwo.tokenscope");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(legacy.join("tokscope.db"), "old").unwrap();
+        std::fs::write(current.join("tokenscope.db"), "new").unwrap();
+
+        import_legacy_data(&current).unwrap();
+
+        assert_eq!(std::fs::read_to_string(current.join("tokenscope.db")).unwrap(), "new");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn no_legacy_directory_is_a_noop() {
+        let root = temp_root("legacy-none");
+        let current = root.join("sk.versiontwo.tokenscope");
+        std::fs::create_dir_all(&current).unwrap();
+        import_legacy_data(&current).unwrap();
+        assert_eq!(std::fs::read_dir(&current).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
