@@ -350,26 +350,35 @@ impl Database {
                                  WHERE m.uuid = tool_calls.turn_uuid)
               WHERE turn_uuid IN (SELECT uuid FROM migrate_map WHERE id != survivor_id);
 
-             CREATE TEMP TABLE migrate_agg AS
-             SELECT m.survivor_id AS id,
-                    MAX(t.output_tokens) AS output_tokens,
-                    SUM(t.thinking_chars) AS thinking_chars,
-                    SUM(t.text_chars) AS text_chars,
-                    SUM(t.tool_input_chars) AS tool_input_chars,
-                    SUM(t.thinking_blocks) AS thinking_blocks,
-                    MIN(t.timestamp) AS timestamp
+             CREATE TEMP TABLE migrate_agg (
+                 id INTEGER PRIMARY KEY,
+                 output_tokens INTEGER NOT NULL,
+                 thinking_chars INTEGER NOT NULL,
+                 text_chars INTEGER NOT NULL,
+                 tool_input_chars INTEGER NOT NULL,
+                 thinking_blocks INTEGER NOT NULL,
+                 timestamp TEXT NOT NULL);
+             INSERT INTO migrate_agg
+             SELECT m.survivor_id,
+                    MAX(t.output_tokens),
+                    SUM(t.thinking_chars),
+                    SUM(t.text_chars),
+                    SUM(t.tool_input_chars),
+                    SUM(t.thinking_blocks),
+                    MIN(t.timestamp)
              FROM migrate_map m JOIN turns t ON t.id = m.id
              GROUP BY m.survivor_id
              HAVING COUNT(*) > 1;
 
              UPDATE turns SET
-                 output_tokens    = (SELECT a.output_tokens FROM migrate_agg a WHERE a.id = turns.id),
-                 thinking_chars   = (SELECT a.thinking_chars FROM migrate_agg a WHERE a.id = turns.id),
-                 text_chars       = (SELECT a.text_chars FROM migrate_agg a WHERE a.id = turns.id),
-                 tool_input_chars = (SELECT a.tool_input_chars FROM migrate_agg a WHERE a.id = turns.id),
-                 thinking_blocks  = (SELECT a.thinking_blocks FROM migrate_agg a WHERE a.id = turns.id),
-                 timestamp        = (SELECT a.timestamp FROM migrate_agg a WHERE a.id = turns.id)
-             WHERE id IN (SELECT id FROM migrate_agg);
+                 output_tokens    = a.output_tokens,
+                 thinking_chars   = a.thinking_chars,
+                 text_chars       = a.text_chars,
+                 tool_input_chars = a.tool_input_chars,
+                 thinking_blocks  = a.thinking_blocks,
+                 timestamp        = a.timestamp
+             FROM migrate_agg a
+             WHERE a.id = turns.id;
 
              DELETE FROM turns WHERE id IN (SELECT id FROM migrate_map WHERE id != survivor_id);
 
