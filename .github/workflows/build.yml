@@ -2,6 +2,14 @@ name: Build TokenScope
 
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: Which targets to build
+        type: choice
+        options:
+          - all
+          - macos-arm
+        default: all
   push:
     tags:
       - 'v*'
@@ -11,6 +19,7 @@ permissions:
 
 jobs:
   test:
+    if: inputs.only != 'macos-arm'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +42,7 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml
 
   build-windows:
+    if: inputs.only != 'macos-arm'
     needs: test
     runs-on: windows-latest
     steps:
@@ -52,6 +62,7 @@ jobs:
             src-tauri/target/release/bundle/msi/*.msi
 
   build-linux:
+    if: inputs.only != 'macos-arm'
     needs: test
     runs-on: ubuntu-22.04
     steps:
@@ -86,6 +97,7 @@ jobs:
 
   build-macos:
     needs: test
+    if: ${{ !cancelled() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,6 +131,7 @@ jobs:
           APPLE_SIGNING_IDENTITY: TokenScope Self-Signed
         run: cargo tauri build --target aarch64-apple-darwin --bundles dmg
       - name: Build (Intel)
+        if: inputs.only != 'macos-arm'
         env:
           APPLE_SIGNING_IDENTITY: TokenScope Self-Signed
         run: cargo tauri build --target x86_64-apple-darwin --bundles dmg
