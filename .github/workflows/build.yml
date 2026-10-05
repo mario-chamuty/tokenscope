@@ -118,6 +118,7 @@ jobs:
             -addext "keyUsage=critical,digitalSignature" \
             -addext "extendedKeyUsage=critical,codeSigning"
           openssl pkcs12 -export -inkey "$RUNNER_TEMP/key.pem" -in "$RUNNER_TEMP/cert.pem" \
+            -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
             -out "$RUNNER_TEMP/cert.p12" -passout "pass:$P12_PASSWORD"
           security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
           security set-keychain-settings -lut 21600 build.keychain
