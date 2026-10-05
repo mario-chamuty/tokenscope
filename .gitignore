@@ -29,4 +29,3 @@ docker/macos/storage/
 docker/macos/id_ed25519
 docker/macos/id_ed25519.pub
 /dist-linux
-node_modules

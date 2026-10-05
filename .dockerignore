@@ -1,5 +1,0 @@
-src-tauri/target
-node_modules
-.git
-*.exe
-*.msi
