@@ -3,7 +3,8 @@ const { listen } = window.__TAURI__.event;
 const { getCurrentWindow } = window.__TAURI__.window;
 
 let layout = 'compact';
-let selectedProject = ''; // empty = all/global
+let selectedProject = '';
+let errorLabel = null;
 
 function fmt(n) {
   if (n == null) return '--';
@@ -20,10 +21,54 @@ function fmtCost(n) {
   return '$' + n.toFixed(2);
 }
 
+function showError(label, err) {
+  console.error(label, err);
+  errorLabel = label;
+  const message = label + ': ' + String(err?.message ?? err);
+  const box = document.getElementById('mini-error');
+  document.getElementById('mini-error-text').textContent = message;
+  box.title = message;
+  box.classList.remove('hidden');
+}
+
+function clearError(label) {
+  if (errorLabel !== label) return;
+  errorLabel = null;
+  document.getElementById('mini-error').classList.add('hidden');
+}
+
+document.getElementById('mini-error-close').addEventListener('click', () => {
+  errorLabel = null;
+  document.getElementById('mini-error').classList.add('hidden');
+});
+
+function coalesced(task) {
+  let running = false;
+  let queued = false;
+  return async () => {
+    if (running) {
+      queued = true;
+      return;
+    }
+    running = true;
+    try {
+      do {
+        queued = false;
+        await task();
+      } while (queued);
+    } finally {
+      running = false;
+    }
+  };
+}
+
+function on(event, handler) {
+  listen(event, handler).catch(e => showError('Event ' + event, e));
+}
+
 function updateValues(s) {
   const hasProject = !!selectedProject && !!s.active_session;
 
-  // Compact - show project session stats when filtered, else global
   if (hasProject) {
     const ap = s.active_session;
     document.getElementById('c-cost').textContent = fmtCost(ap.session_cost);
@@ -37,13 +82,11 @@ function updateValues(s) {
     document.getElementById('c-total').textContent = fmtCost(s.total_cost);
   }
 
-  // Expanded - always show today globals in grid
   document.getElementById('e-cost').textContent = fmtCost(s.today_cost);
   document.getElementById('e-tokens').textContent = fmt(s.today_tokens);
   document.getElementById('e-sessions').textContent = s.today_sessions;
   document.getElementById('e-total').textContent = fmtCost(s.total_cost);
 
-  // Brand name & dot
   const cName = document.getElementById('c-name');
   const eName = document.getElementById('e-name');
   const cDot = document.getElementById('c-dot');
@@ -81,33 +124,33 @@ function updateValues(s) {
   }
 }
 
-async function loadStats() {
+const loadStats = coalesced(async () => {
+  const project = selectedProject;
   try {
-    const s = await invoke('get_mini_stats', { project: selectedProject || null });
+    const s = await invoke('get_mini_stats', { project: project || null });
+    if (project !== selectedProject) return;
     updateValues(s);
+    clearError('Mini stats');
   } catch (e) {
-    console.error('Mini stats error:', e);
+    showError('Mini stats', e);
   }
-}
+});
 
-// ─── Project picker (native popup menu) ───
 function openProjectPicker(e) {
   e.preventDefault();
   e.stopPropagation();
-  invoke('show_project_picker').catch(err => console.error('Picker error:', err));
+  invoke('show_project_picker').catch(err => showError('Project picker', err));
 }
 
 document.getElementById('c-brand').addEventListener('mousedown', openProjectPicker);
 document.getElementById('e-brand').addEventListener('mousedown', openProjectPicker);
 
-// Listen for selection from native menu
-listen('project-selected', (event) => {
+on('project-selected', (event) => {
   selectedProject = event.payload || '';
   loadStats();
 });
 
-// ─── Layout ───
-async function applyLayout(newLayout) {
+async function setLayout(newLayout) {
   layout = newLayout;
   const win = getCurrentWindow();
   const compact = document.getElementById('compact');
@@ -122,56 +165,43 @@ async function applyLayout(newLayout) {
     expanded.classList.remove('hidden');
     await win.setSize(new window.__TAURI__.dpi.LogicalSize(400, 130));
   }
+}
 
+async function applyLayout(newLayout) {
   try {
-    const settings = await invoke('get_settings');
-    settings.mini_layout = layout;
-    await invoke('save_settings', { newSettings: settings });
+    await setLayout(newLayout);
+    await invoke('set_mini_layout', { layout });
+    clearError('Mini layout');
   } catch (e) {
-    console.error('Save settings error:', e);
+    showError('Mini layout', e);
   }
 }
 
-// Toggle layout on double-click (but not on brand or close)
 document.addEventListener('dblclick', (e) => {
   if (e.target.tagName === 'BUTTON' || e.target.closest('#c-brand') || e.target.closest('#e-brand')) return;
   applyLayout(layout === 'compact' ? 'expanded' : 'compact');
 });
 
-// Close buttons
-// The static mini window (label === "mini") is reusable from the tray, so we
-// hide it. Dynamic spawns (label "mini-<timestamp>") have no tray entry, so
-// hiding would just leak an invisible, unreachable window — close/destroy
-// instead.
+// Only the static "mini" window is reusable from the tray; dynamic "mini-<timestamp>" windows
+// have no tray entry, so hiding them would leak an invisible window.
 function closeOrHide(e) {
   e.preventDefault();
   e.stopPropagation();
   const w = getCurrentWindow();
-  if (w.label === 'mini') {
-    w.hide();
-  } else {
-    w.close();
-  }
+  (w.label === 'mini' ? w.hide() : w.close()).catch(err => showError('Close window', err));
 }
 document.getElementById('c-close').addEventListener('mousedown', closeOrHide);
 document.getElementById('e-close').addEventListener('mousedown', closeOrHide);
 
-// Events
-listen('refresh-tick', () => loadStats());
-listen('scan-complete', () => loadStats());
+on('refresh-tick', () => loadStats());
+on('scan-complete', () => loadStats());
 
-// Self-poll every 10s
-setInterval(loadStats, 10000);
-
-// Init
 (async () => {
   try {
     const settings = await invoke('get_settings');
-    await applyLayout(settings.mini_layout || 'compact');
-  } catch {
-    await applyLayout('compact');
+    await setLayout(settings.mini_layout);
+  } catch (e) {
+    showError('Mini layout', e);
   }
   loadStats();
-  setTimeout(loadStats, 3000);
-  setTimeout(loadStats, 8000);
 })();

@@ -1,12 +1,8 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
-const { emit } = window.__TAURI__.event;
 const { getCurrentWindow } = window.__TAURI__.window;
 
 let currentRange = '30d';
-// The Advanced Breakdown tab has its own range control so users can inspect
-// all-time tool/skill/subagent counts without widening the top-bar range
-// (which would also change the daily chart and sessions list).
 let advancedRange = 'all';
 let currentProject = '';
 let activeModels = ['fable', 'opus', 'sonnet', 'haiku', 'mythos', 'other'];
@@ -19,8 +15,9 @@ let currentSessions = [];
 let sortCol = 'last_active';
 let sortDir = 'desc';
 let expandedSession = null;
+let turnsCache = { sid: null, html: '' };
+let renderedSessionsKey = '';
 
-// ─── Colors ───
 const C = {
   input:   '#4facfe',
   output:  '#00f2fe',
@@ -37,7 +34,83 @@ const C = {
   cost:    '#34d399',
 };
 
-// ─── Formatting ───
+const MODEL_COLORS = {
+  fable: C.fable,
+  mythos: C.mythos,
+  opus: C.opus,
+  sonnet: C.sonnet,
+  haiku: C.haiku,
+  other: C.other,
+};
+
+function escHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function errorMessage(err) {
+  return String(err?.message ?? err);
+}
+
+const errorToasts = new Map();
+
+function showError(label, err) {
+  console.error(label, err);
+  let toast = errorToasts.get(label);
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.className = 'error-toast';
+    const text = document.createElement('span');
+    text.className = 'error-toast-text';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'alert-close';
+    close.textContent = '×';
+    close.addEventListener('click', () => clearError(label));
+    toast.append(text, close);
+    document.getElementById('error-toasts').appendChild(toast);
+    errorToasts.set(label, toast);
+  }
+  toast.firstChild.textContent = label + ': ' + errorMessage(err);
+}
+
+function clearError(label) {
+  const toast = errorToasts.get(label);
+  if (toast) {
+    toast.remove();
+    errorToasts.delete(label);
+  }
+}
+
+function coalesced(task) {
+  let running = false;
+  let queued = false;
+  return async () => {
+    if (running) {
+      queued = true;
+      return;
+    }
+    running = true;
+    try {
+      do {
+        queued = false;
+        await task();
+      } while (queued);
+    } finally {
+      running = false;
+    }
+  };
+}
+
+const htmlCache = new WeakMap();
+
+function setHtml(el, html) {
+  if (htmlCache.get(el) === html) return;
+  htmlCache.set(el, html);
+  el.innerHTML = html;
+}
+
 function fmt(n) {
   if (n == null) return '--';
   const abs = Math.abs(n);
@@ -62,9 +135,18 @@ function fmtDur(m) {
 function fmtTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);
+  if (isNaN(d)) return String(iso);
   const month = d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
-  const time = d.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hour12: false });
+  // hour12:false renders midnight as 24:xx in Chromium
+  const time = d.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
   return month + ' ' + time;
+}
+
+function fmtClock(utc) {
+  // last_updated is "YYYY-MM-DD HH:MM:SS" in UTC without a zone marker
+  const d = new Date(utc.replace(' ', 'T') + 'Z');
+  if (isNaN(d)) return utc;
+  return d.toLocaleTimeString('en', { hourCycle: 'h23' });
 }
 
 function modelKey(m) {
@@ -77,12 +159,15 @@ function modelKey(m) {
   return 'other';
 }
 
-// ─── Chart.js global config ───
 Chart.defaults.font.family = "'JetBrains Mono', monospace";
 Chart.defaults.color = C.text;
 Chart.defaults.borderColor = C.grid;
 
-// ─── Scan Progress ───
+function hideScanOverlay() {
+  document.getElementById('scan-overlay').classList.add('hidden');
+  document.getElementById('live-dot').classList.remove('scanning');
+}
+
 function showScanProgress(p) {
   const overlay = document.getElementById('scan-overlay');
   overlay.classList.remove('hidden');
@@ -93,6 +178,11 @@ function showScanProgress(p) {
     document.getElementById('scan-files').textContent = '';
     document.getElementById('scan-turns').textContent = '';
     document.getElementById('scan-fill').style.width = '0%';
+  } else if (p.phase === 'migrating') {
+    document.getElementById('scan-detail').textContent = 'Upgrading the usage database (a backup is saved first)...';
+    document.getElementById('scan-files').textContent = '';
+    document.getElementById('scan-turns').textContent = '';
+    document.getElementById('scan-fill').style.width = '0%';
   } else if (p.phase === 'scanning') {
     const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
     document.getElementById('scan-detail').textContent = p.current_project || 'Scanning...';
@@ -100,14 +190,11 @@ function showScanProgress(p) {
     document.getElementById('scan-turns').textContent = fmt(p.turns_found) + ' turns';
     document.getElementById('scan-fill').style.width = pct + '%';
   } else if (p.phase === 'done') {
-    overlay.classList.add('hidden');
-    document.getElementById('live-dot').classList.remove('scanning');
+    hideScanOverlay();
     isScanning = false;
   }
 }
 
-/// Show the loader synchronously — before any await — so the user never
-/// sees the app "do nothing" during startup while we query is_scanning.
 function forceShowLoader() {
   const overlay = document.getElementById('scan-overlay');
   overlay.classList.remove('hidden');
@@ -116,63 +203,59 @@ function forceShowLoader() {
   document.getElementById('scan-fill').style.width = '0%';
 }
 
-// ─── Dashboard ───
-async function loadDashboard() {
+const queryKey = () => JSON.stringify([currentRange, activeModels, currentProject]);
+const advancedKey = () => JSON.stringify([advancedRange, activeModels, currentProject]);
+
+const loadDashboard = coalesced(async () => {
+  const key = queryKey();
   try {
     const data = await invoke('get_dashboard', {
       range: currentRange,
       models: activeModels,
       project: currentProject || null,
     });
+    if (key !== queryKey()) return;
     renderStats(data.summary);
     renderDailyChart(data.daily);
     renderModelChart(data.by_model);
     renderProjectChart(data.top_projects);
     currentSessions = data.recent_sessions;
+    sortSessions();
     renderTable(currentSessions);
     updateProjectFilter(data.projects);
-    document.getElementById('last-updated').textContent = data.last_updated + ' UTC';
-    refreshCountdown = 30;
+    document.getElementById('last-updated').textContent = fmtClock(data.last_updated);
+    clearError('Dashboard');
   } catch (e) {
-    console.error('Dashboard load error:', e);
+    showError('Dashboard', e);
   }
+  loadAdvanced();
+});
 
-  // Advanced breakdown — independent of the main dashboard query so a
-  // failure here (older DB schema, empty data) doesn't take down the rest.
-  // Uses its own `advancedRange` so users can inspect all-time counts without
-  // blowing up the dashboard time window.
-  await loadAdvanced();
-}
-
-async function loadAdvanced() {
+const loadAdvanced = coalesced(async () => {
+  const key = advancedKey();
   try {
     const adv = await invoke('get_advanced_stats', {
       range: advancedRange,
       models: activeModels,
       project: currentProject || null,
     });
+    if (key !== advancedKey()) return;
     renderAdvanced(adv);
+    clearError('Advanced stats');
   } catch (e) {
-    console.error('Advanced stats error:', e);
+    showError('Advanced stats', e);
   }
-}
+});
 
-// ─── Advanced Stats rendering ───
 function renderAdvanced(a) {
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
   const setW = (id, pct) => { const el = document.getElementById(id); if (el) el.style.width = pct.toFixed(1) + '%'; };
-  const estTokens = chars => Math.round((chars || 0) / 4); // Anthropic's rough rule of thumb
+  const estTokens = chars => Math.round((chars || 0) / 4);
 
-  // ── Output Composition ────────────────────────────────────────────────
-  // Denominator is the authoritative output_tokens from the API. We estimate
-  // text and tool tokens from chars/4, and attribute the residual to
-  // "thinking" since extended-thinking tokens are billed as output but the
-  // raw thinking text is never logged (only the encrypted signature).
+  // Thinking tokens are billed as output but never logged, so they are the residual.
   const outputTotal = a.total_output_tokens || 0;
   const textEst = estTokens(a.text_chars);
   const toolEst = estTokens(a.tool_input_chars);
-  // Clamp the residual at 0 — char-estimation overshoots for short responses
-  // and otherwise we'd show negative "thinking" which is nonsense.
   const thinkEst = Math.max(0, outputTotal - textEst - toolEst);
   const denom = Math.max(1, outputTotal);
 
@@ -186,7 +269,6 @@ function renderAdvanced(a) {
   set('compo-thinking-turns', fmt(a.turns_with_thinking || 0));
   set('compo-total-turns', fmt(a.total_turns || 0));
 
-  // ── Input / cache composition ────────────────────────────────────────
   const fresh = a.total_input_tokens || 0;
   const cWrite = a.total_cache_creation || 0;
   const cRead = a.total_cache_read || 0;
@@ -201,18 +283,15 @@ function renderAdvanced(a) {
   set('cache-write-val', `${fmt(cWrite)} tok (${((cWrite / inputDenom)*100).toFixed(1)}%)`);
   set('cache-read-val',  `${fmt(cRead)} tok (${((cRead / inputDenom)*100).toFixed(1)}%)`);
 
-  // ── Interaction counters ─────────────────────────────────────────────
   set('stat-ask-user',  fmt(a.ask_user_count || 0));
   set('stat-plan-mode', fmt(a.plan_mode_count || 0));
   set('stat-denied',    fmt(a.denied_count || 0));
 
-  // Summary line
   const summary = document.getElementById('advanced-summary');
   if (summary) {
     summary.textContent = `${fmt(a.turns_with_thinking)} turns w/ thinking · ${fmt(a.turns_with_tools)} turns w/ tools · ${fmt(a.total_turns)} total`;
   }
 
-  // Subagents
   const sub = a.subagent_stats || {};
   set('sub-spawn', fmt(sub.spawn_count || 0));
   set('sub-turns', fmt(sub.subagent_turns || 0));
@@ -220,105 +299,98 @@ function renderAdvanced(a) {
   set('sub-output', fmt(sub.subagent_output_tokens || 0));
   set('sub-cost', fmtCost(sub.subagent_cost || 0));
 
-  // ── Denied tools breakdown ──────────────────────────────────────────
   const deniedBody = document.getElementById('denied-body');
   if (deniedBody) {
     if (!a.denied_breakdown || !a.denied_breakdown.length) {
-      deniedBody.innerHTML = '<tr><td colspan="3" class="empty">No denied calls in range</td></tr>';
+      setHtml(deniedBody, '<tr><td colspan="3" class="empty">No denied calls in range</td></tr>');
     } else {
-      deniedBody.innerHTML = a.denied_breakdown.map(d =>
+      setHtml(deniedBody, a.denied_breakdown.map(d =>
         `<tr>
           <td>${escHtml(d.tool_name)}</td>
-          <td><span class="tool-cat tool-cat-${d.category}">${escHtml(d.category)}</span></td>
+          <td><span class="tool-cat tool-cat-${escHtml(d.category)}">${escHtml(d.category)}</span></td>
           <td class="num">${fmt(d.call_count)}</td>
         </tr>`
-      ).join('');
+      ).join(''));
     }
   }
 
-  // Skills
   const skillBody = document.getElementById('skill-body');
   if (!a.skill_breakdown || !a.skill_breakdown.length) {
-    skillBody.innerHTML = '<tr><td colspan="2" class="empty">No skill invocations in range</td></tr>';
+    setHtml(skillBody, '<tr><td colspan="2" class="empty">No skill invocations in range</td></tr>');
   } else {
-    skillBody.innerHTML = a.skill_breakdown.map(s =>
+    setHtml(skillBody, a.skill_breakdown.map(s =>
       `<tr><td>${escHtml(s.skill_name)}</td><td class="num">${fmt(s.call_count)}</td></tr>`
-    ).join('');
+    ).join(''));
   }
 
-  // Tools
   const toolBody = document.getElementById('tool-body');
   if (!a.tool_breakdown || !a.tool_breakdown.length) {
-    toolBody.innerHTML = '<tr><td colspan="4" class="empty">No tool calls in range</td></tr>';
+    setHtml(toolBody, '<tr><td colspan="4" class="empty">No tool calls in range</td></tr>');
   } else {
-    toolBody.innerHTML = a.tool_breakdown.slice(0, 20).map(t =>
+    setHtml(toolBody, a.tool_breakdown.slice(0, 20).map(t =>
       `<tr>
         <td>${escHtml(t.tool_name)}</td>
-        <td><span class="tool-cat tool-cat-${t.category}">${escHtml(t.category)}</span></td>
+        <td><span class="tool-cat tool-cat-${escHtml(t.category)}">${escHtml(t.category)}</span></td>
         <td class="num">${fmt(t.call_count)}</td>
         <td class="num">${fmt(t.input_chars)}</td>
       </tr>`
-    ).join('');
+    ).join(''));
   }
 
-  // MCP
   const mcpBody = document.getElementById('mcp-body');
   if (!a.mcp_breakdown || !a.mcp_breakdown.length) {
-    mcpBody.innerHTML = '<tr><td colspan="4" class="empty">No MCP calls in range</td></tr>';
+    setHtml(mcpBody, '<tr><td colspan="4" class="empty">No MCP calls in range</td></tr>');
   } else {
-    mcpBody.innerHTML = a.mcp_breakdown.map(m =>
+    setHtml(mcpBody, a.mcp_breakdown.map(m =>
       `<tr>
         <td>${escHtml(m.server)}</td>
         <td class="num">${fmt(m.tool_count)}</td>
         <td class="num">${fmt(m.call_count)}</td>
         <td class="num">${fmt(m.input_chars)}</td>
       </tr>`
-    ).join('');
+    ).join(''));
   }
 
-  // Simple subject-count table renderer — shared by bash/files/domains.
-  const renderPairs = (elId, rows, col1Label, emptyLabel) => {
+  const renderPairs = (elId, rows, emptyLabel) => {
     const el = document.getElementById(elId);
     if (!el) return;
     if (!rows || !rows.length) {
-      el.innerHTML = `<tr><td colspan="2" class="empty">${emptyLabel}</td></tr>`;
+      setHtml(el, `<tr><td colspan="2" class="empty">${emptyLabel}</td></tr>`);
       return;
     }
-    el.innerHTML = rows.map(r =>
+    setHtml(el, rows.map(r =>
       `<tr><td>${escHtml(r.subject)}</td><td class="num">${fmt(r.call_count)}</td></tr>`
-    ).join('');
+    ).join(''));
   };
 
-  // Subagent types (Task/Agent by subagent_type)
   const subtypeBody = document.getElementById('subtype-body');
   if (subtypeBody) {
     if (!a.subagent_types || !a.subagent_types.length) {
-      subtypeBody.innerHTML = '<tr><td colspan="2" class="empty">No subagent spawns in range</td></tr>';
+      setHtml(subtypeBody, '<tr><td colspan="2" class="empty">No subagent spawns in range</td></tr>');
     } else {
-      subtypeBody.innerHTML = a.subagent_types.map(r =>
+      setHtml(subtypeBody, a.subagent_types.map(r =>
         `<tr><td>${escHtml(r.subagent_type)}</td><td class="num">${fmt(r.call_count)}</td></tr>`
-      ).join('');
+      ).join(''));
     }
   }
 
-  renderPairs('bash-body', a.top_bash, 'Command', 'No bash invocations in range');
-  renderPairs('files-body', a.top_files, 'File', 'No file operations in range');
-  renderPairs('domains-body', a.top_domains, 'Host', 'No WebFetch calls in range');
+  renderPairs('bash-body', a.top_bash, 'No bash invocations in range');
+  renderPairs('files-body', a.top_files, 'No file operations in range');
+  renderPairs('domains-body', a.top_domains, 'No WebFetch calls in range');
 
-  // Category totals
   const catBody = document.getElementById('cat-body');
   if (catBody) {
     if (!a.category_totals || !a.category_totals.length) {
-      catBody.innerHTML = '<tr><td colspan="4" class="empty">No tool calls in range</td></tr>';
+      setHtml(catBody, '<tr><td colspan="4" class="empty">No tool calls in range</td></tr>');
     } else {
-      catBody.innerHTML = a.category_totals.map(c =>
+      setHtml(catBody, a.category_totals.map(c =>
         `<tr>
-          <td><span class="tool-cat tool-cat-${c.category}">${escHtml(c.category)}</span></td>
+          <td><span class="tool-cat tool-cat-${escHtml(c.category)}">${escHtml(c.category)}</span></td>
           <td class="num">${fmt(c.call_count)}</td>
           <td class="num">${fmt(c.turn_count)}</td>
           <td class="num">${fmt(c.input_chars)}</td>
         </tr>`
-      ).join('');
+      ).join(''));
     }
   }
 }
@@ -341,24 +413,24 @@ function renderStats(s) {
   }
 }
 
-// ─── Project Filter ───
 function updateProjectFilter(projects) {
   const sel = document.getElementById('project-filter');
-  const current = sel.value;
-  // Only rebuild if projects changed
   const existing = [...sel.options].slice(1).map(o => o.value);
-  if (JSON.stringify(existing) === JSON.stringify(projects)) {
-    sel.value = current;
-    return;
+  if (JSON.stringify(existing) !== JSON.stringify(projects)) {
+    sel.innerHTML = '<option value="">All Projects</option>';
+    for (const p of projects) {
+      const opt = document.createElement('option');
+      opt.value = p;
+      opt.textContent = p;
+      sel.appendChild(opt);
+    }
   }
-  sel.innerHTML = '<option value="">All Projects</option>';
-  for (const p of projects) {
-    const opt = document.createElement('option');
-    opt.value = p;
-    opt.textContent = p;
-    sel.appendChild(opt);
+  if (currentProject && !projects.includes(currentProject)) {
+    currentProject = '';
+    resetCharts();
+    loadDashboard();
   }
-  sel.value = current;
+  sel.value = currentProject;
 }
 
 document.getElementById('project-filter').addEventListener('change', (e) => {
@@ -367,7 +439,6 @@ document.getElementById('project-filter').addEventListener('change', (e) => {
   loadDashboard();
 });
 
-// ─── Daily Stacked Bar + Cost Line ───
 function renderDailyChart(daily) {
   const labels = daily.map(d => d.date.slice(5));
   const inputData = daily.map(d => d.input_tokens);
@@ -442,16 +513,10 @@ function renderDailyChart(daily) {
   });
 }
 
-// ─── Model Doughnut ───
 function renderModelChart(models) {
   const labels = models.map(m => m.model);
   const data = models.map(m => m.total_tokens);
-  const colors = models.map(m => {
-    if (m.family === 'opus')   return C.opus;
-    if (m.family === 'sonnet') return C.sonnet;
-    if (m.family === 'haiku')  return C.haiku;
-    return C.other;
-  });
+  const colors = models.map(m => MODEL_COLORS[m.family] ?? C.other);
 
   if (modelChart) {
     modelChart.data.labels = labels;
@@ -483,7 +548,6 @@ function renderModelChart(models) {
   });
 }
 
-// ─── Project Horizontal Bar ───
 function renderProjectChart(projects) {
   const labels = projects.map(p => p.project);
   const inputData = projects.map(p => p.input_tokens);
@@ -520,11 +584,22 @@ function renderProjectChart(projects) {
   });
 }
 
-// ─── Sessions Table (sortable + expandable) ───
+function sortSessions() {
+  const dir = sortDir === 'asc' ? 1 : -1;
+  currentSessions.sort((a, b) => {
+    const va = a[sortCol], vb = b[sortCol];
+    return dir * (typeof va === 'string' ? va.localeCompare(vb) : va - vb);
+  });
+}
+
 function renderTable(sessions) {
+  const key = JSON.stringify([sessions, expandedSession]);
+  if (key === renderedSessionsKey) return;
+
   const tbody = document.getElementById('sessions-body');
   if (!sessions.length) {
     tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:24px">No sessions in range</td></tr>';
+    renderedSessionsKey = key;
     return;
   }
 
@@ -535,10 +610,11 @@ function renderTable(sessions) {
       ? `<span class="subagent-badge">${s.subagent_turns} sub</span>`
       : '';
     const isExpanded = expandedSession === s.session_id;
+    const sid = escHtml(s.session_id);
 
-    html += `<tr class="session-row" data-sid="${s.session_id}">
-      <td class="sid">${s.session_id.slice(0, 8)}</td>
-      <td>${s.project}</td>
+    html += `<tr class="session-row" data-sid="${sid}">
+      <td class="sid">${escHtml(s.session_id.slice(0, 8))}</td>
+      <td>${escHtml(s.project)}</td>
       <td>${fmtTime(s.last_active)}</td>
       <td>${fmtDur(s.duration_minutes)}</td>
       <td class="model-${mk}">${mk}${subBadge}</td>
@@ -546,72 +622,83 @@ function renderTable(sessions) {
       <td class="num">${fmt(s.input_tokens)}</td>
       <td class="num">${fmt(s.output_tokens)}</td>
       <td class="num cost-val">${fmtCost(s.est_cost)}</td>
-      <td><button class="expand-btn" data-sid="${s.session_id}">${isExpanded ? '\u25B2' : '\u25BC'}</button></td>
+      <td><button class="expand-btn" data-sid="${sid}">${isExpanded ? '▲' : '▼'}</button></td>
     </tr>`;
 
     if (isExpanded) {
-      html += `<tr class="detail-row" id="detail-${s.session_id}">
-        <td colspan="10"><div class="detail-content"><em style="color:var(--text-muted)">Loading turns...</em></div></td>
+      const detail = turnsCache.sid === s.session_id
+        ? turnsCache.html
+        : '<em style="color:var(--text-muted)">Loading turns...</em>';
+      html += `<tr class="detail-row" id="detail-${sid}">
+        <td colspan="10"><div class="detail-content">${detail}</div></td>
       </tr>`;
     }
   }
   tbody.innerHTML = html;
+  renderedSessionsKey = key;
 
-  // If there's an expanded session, load its turns
   if (expandedSession) {
     loadSessionTurns(expandedSession);
   }
 }
 
-// ─── Session Drill-down ───
-document.getElementById('sessions-body').addEventListener('click', async (e) => {
+document.getElementById('sessions-body').addEventListener('click', (e) => {
   const btn = e.target.closest('.expand-btn');
   if (!btn) return;
 
   const sid = btn.dataset.sid;
-  if (expandedSession === sid) {
-    expandedSession = null;
-  } else {
-    expandedSession = sid;
-  }
+  expandedSession = expandedSession === sid ? null : sid;
+  turnsCache = { sid: null, html: '' };
   renderTable(currentSessions);
 });
 
+let turnsSeq = 0;
+
 async function loadSessionTurns(sid) {
+  const seq = ++turnsSeq;
+  let html = null;
+  let failure = null;
   try {
     const turns = await invoke('get_session_turns', { sessionId: sid });
-    const detailRow = document.getElementById('detail-' + sid);
-    if (!detailRow) return;
-
-    const content = detailRow.querySelector('.detail-content');
-    if (!turns.length) {
-      content.innerHTML = '<em style="color:var(--text-muted)">No turns found</em>';
-      return;
-    }
-
-    let html = '<table><thead><tr><th>Time</th><th>Model</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache Rd</th><th class="num">Cache Wr</th><th class="num">Cost</th><th></th></tr></thead><tbody>';
-    for (const t of turns) {
-      const mk = modelKey(t.model);
-      const sub = t.is_subagent ? '<span class="subagent-badge">sub</span>' : '';
-      html += `<tr>
-        <td>${fmtTime(t.timestamp)}</td>
-        <td class="model-${mk}">${mk}${sub}</td>
-        <td class="num">${fmt(t.input_tokens)}</td>
-        <td class="num">${fmt(t.output_tokens)}</td>
-        <td class="num">${fmt(t.cache_read)}</td>
-        <td class="num">${fmt(t.cache_creation)}</td>
-        <td class="num cost-val">${fmtCost(t.est_cost)}</td>
-        <td></td>
-      </tr>`;
-    }
-    html += '</tbody></table>';
-    content.innerHTML = html;
+    html = turnsTableHtml(turns);
+    clearError('Session turns');
   } catch (e) {
-    console.error('Load turns error:', e);
+    failure = e;
   }
+  if (seq !== turnsSeq || expandedSession !== sid) return;
+
+  const detailRow = document.getElementById('detail-' + sid);
+  const content = detailRow && detailRow.querySelector('.detail-content');
+  if (failure !== null) {
+    showError('Session turns', failure);
+    if (content) content.innerHTML = `<em style="color:var(--accent-red)">Failed to load turns: ${escHtml(errorMessage(failure))}</em>`;
+    return;
+  }
+  turnsCache = { sid, html };
+  if (content) content.innerHTML = html;
 }
 
-// ─── Sortable Table Headers ───
+function turnsTableHtml(turns) {
+  if (!turns.length) return '<em style="color:var(--text-muted)">No turns found</em>';
+
+  let html = '<table><thead><tr><th>Time</th><th>Model</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache Rd</th><th class="num">Cache Wr</th><th class="num">Cost</th><th></th></tr></thead><tbody>';
+  for (const t of turns) {
+    const mk = modelKey(t.model);
+    const sub = t.is_subagent ? '<span class="subagent-badge">sub</span>' : '';
+    html += `<tr>
+      <td>${fmtTime(t.timestamp)}</td>
+      <td class="model-${mk}">${mk}${sub}</td>
+      <td class="num">${fmt(t.input_tokens)}</td>
+      <td class="num">${fmt(t.output_tokens)}</td>
+      <td class="num">${fmt(t.cache_read)}</td>
+      <td class="num">${fmt(t.cache_creation)}</td>
+      <td class="num cost-val">${fmtCost(t.est_cost)}</td>
+      <td></td>
+    </tr>`;
+  }
+  return html + '</tbody></table>';
+}
+
 document.querySelectorAll('thead th.sortable').forEach(th => {
   th.addEventListener('click', () => {
     const col = th.dataset.sort;
@@ -622,23 +709,14 @@ document.querySelectorAll('thead th.sortable').forEach(th => {
       sortDir = col === 'last_active' || col === 'est_cost' || col === 'turns' || col === 'input_tokens' || col === 'output_tokens' || col === 'duration_minutes' ? 'desc' : 'asc';
     }
 
-    // Update header classes
     document.querySelectorAll('thead th.sortable').forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
     th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
 
-    // Sort sessions
-    currentSessions.sort((a, b) => {
-      let va = a[col], vb = b[col];
-      if (typeof va === 'string') {
-        return sortDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
-      }
-      return sortDir === 'asc' ? va - vb : vb - va;
-    });
+    sortSessions();
     renderTable(currentSessions);
   });
 });
 
-// ─── Filter Handlers ───
 function resetCharts() {
   if (dailyChart)   { dailyChart.destroy();   dailyChart = null; }
   if (modelChart)   { modelChart.destroy();   modelChart = null; }
@@ -647,6 +725,9 @@ function resetCharts() {
 
 document.querySelectorAll('#model-toggles .toggle').forEach(btn => {
   btn.addEventListener('click', () => {
+    const active = document.querySelectorAll('#model-toggles .toggle.active');
+    // An empty model list makes the backend apply no filter, which would show every model.
+    if (btn.classList.contains('active') && active.length === 1) return;
     btn.classList.toggle('active');
     btn.setAttribute('aria-pressed', String(btn.classList.contains('active')));
     activeModels = [...document.querySelectorAll('#model-toggles .toggle.active')].map(b => b.dataset.model);
@@ -665,9 +746,6 @@ document.querySelectorAll('#range-toggles .toggle').forEach(btn => {
   });
 });
 
-// Advanced-tab's own range — intentionally decoupled from the top-bar range
-// so users can see all-time skill/subagent/tool counts without widening the
-// dashboard range (which would bloat the daily chart and sessions list).
 {
   const advRange = document.getElementById('advanced-range');
   if (advRange) {
@@ -678,7 +756,6 @@ document.querySelectorAll('#range-toggles .toggle').forEach(btn => {
   }
 }
 
-// ─── Dropdown Menus ───
 function setupDropdown(btnId, menuId) {
   const btn = document.getElementById(btnId);
   const menu = document.getElementById(menuId);
@@ -699,108 +776,103 @@ document.querySelectorAll('.dropdown-menu').forEach(m => {
   m.addEventListener('click', e => e.stopPropagation());
 });
 
-// ─── Export: Markdown Report ───
-document.getElementById('act-report').addEventListener('click', async () => {
-  const item = document.getElementById('act-report');
-  const origText = item.textContent;
-  item.textContent = 'Generating...';
+async function runExport(id, busyLabel, errorLabel, action) {
+  const item = document.getElementById(id);
+  if (item.disabled) return;
+  const origHtml = item.innerHTML;
+  item.disabled = true;
+  item.textContent = busyLabel;
   try {
+    await action(label => { item.textContent = label; });
+    document.getElementById('export-menu').classList.remove('open');
+  } catch (e) {
+    showError(errorLabel, e);
+    item.textContent = 'Error!';
+  }
+  setTimeout(() => {
+    item.innerHTML = origHtml;
+    item.disabled = false;
+  }, 1500);
+}
+
+document.getElementById('act-report').addEventListener('click', () =>
+  runExport('act-report', 'Generating...', 'Markdown report', async setLabel => {
     const path = await invoke('generate_report', { range: currentRange });
-    item.textContent = 'Opening...';
+    setLabel('Opening...');
     await invoke('open_path', { path });
-    document.getElementById('export-menu').classList.remove('open');
-  } catch (e) {
-    console.error('Report error:', e);
-    item.textContent = 'Error!';
-  }
-  setTimeout(() => { item.textContent = origText; }, 1500);
-});
+  })
+);
 
-// ─── Export: PDF Report ───
-document.getElementById('act-pdf').addEventListener('click', async () => {
-  const item = document.getElementById('act-pdf');
-  const origText = item.textContent;
-  item.textContent = 'Generating...';
-  try {
+document.getElementById('act-pdf').addEventListener('click', () =>
+  runExport('act-pdf', 'Generating...', 'PDF report', async setLabel => {
     const path = await invoke('generate_pdf', { range: currentRange });
-    item.textContent = 'Opening...';
+    setLabel('Opening...');
     await invoke('open_path', { path });
-    document.getElementById('export-menu').classList.remove('open');
-  } catch (e) {
-    console.error('PDF error:', e);
-    item.textContent = 'Error!';
-  }
-  setTimeout(() => { item.textContent = origText; }, 1500);
-});
+  })
+);
 
-// ─── Export: CSV ───
-document.getElementById('act-csv').addEventListener('click', async () => {
-  const item = document.getElementById('act-csv');
-  const origText = item.textContent;
-  item.textContent = 'Exporting...';
-  try {
+document.getElementById('act-csv').addEventListener('click', () =>
+  runExport('act-csv', 'Exporting...', 'CSV export', async setLabel => {
     const path = await invoke('export_csv', { range: currentRange, models: activeModels });
-    item.textContent = 'Opening folder...';
+    setLabel('Opening folder...');
     await invoke('open_folder', { path });
-    document.getElementById('export-menu').classList.remove('open');
-  } catch (e) {
-    console.error('CSV error:', e);
-    item.textContent = 'Error!';
-  }
-  setTimeout(() => { item.textContent = origText; }, 1500);
-});
+  })
+);
 
-// ─── Tools: Mini Monitor ───
 document.getElementById('act-mini').addEventListener('click', async () => {
   document.getElementById('tools-menu').classList.remove('open');
   try {
     await invoke('show_mini_window');
   } catch (e) {
-    console.error('Mini monitor error:', e);
+    showError('Mini monitor', e);
   }
 });
 
-// ─── Tools: New Mini Monitor ───
 document.getElementById('act-new-mini').addEventListener('click', async () => {
   document.getElementById('tools-menu').classList.remove('open');
   try {
     await invoke('create_mini_window');
   } catch (e) {
-    console.error('New mini monitor error:', e);
+    showError('New mini monitor', e);
   }
 });
 
-// ─── Tools: Full Rescan ───
-// The backend kicks the rescan onto a worker thread and returns immediately,
-// so the UI stays responsive. Progress is surfaced by the existing
-// scan-progress event + polling fallback, which drives the centered overlay.
 document.getElementById('act-rescan').addEventListener('click', async () => {
   const item = document.getElementById('act-rescan');
-  const origText = item.textContent;
+  if (item.disabled) return;
+  const origHtml = item.innerHTML;
+  item.disabled = true;
   document.getElementById('tools-menu').classList.remove('open');
+  forceShowLoader();
   try {
-    forceShowLoader();
     await invoke('full_rescan');
     item.textContent = 'Scanning...';
   } catch (e) {
-    console.error('Rescan error:', e);
-    item.textContent = String(e).startsWith('A scan') ? 'Already running' : 'Error!';
+    // The periodic background scan emits no progress events, so nothing else would hide the loader.
+    if (!isScanning) hideScanOverlay();
+    if (String(e).startsWith('A scan')) {
+      item.textContent = 'Already running';
+    } else {
+      item.textContent = 'Error!';
+      showError('Full rescan', e);
+    }
   }
-  setTimeout(() => { item.textContent = origText; }, 2500);
+  setTimeout(() => {
+    item.innerHTML = origHtml;
+    item.disabled = false;
+  }, 2500);
 });
 
-// ─── Tools: Open Data Folder ───
 document.getElementById('act-open-data').addEventListener('click', async () => {
   document.getElementById('tools-menu').classList.remove('open');
   try {
     const dir = await invoke('get_data_dir');
     await invoke('open_path', { path: dir });
   } catch (e) {
-    console.error('Open folder error:', e);
+    showError('Open data folder', e);
   }
 });
 
-// ─── Tools: Active Sessions ───
 document.getElementById('act-active').addEventListener('click', async () => {
   document.getElementById('tools-menu').classList.remove('open');
   try {
@@ -813,16 +885,17 @@ document.getElementById('act-active').addEventListener('click', async () => {
       tbody.innerHTML = sessions.map(s => {
         const mk = modelKey(s.model);
         return `<tr>
-          <td class="sid">${s.session_id.slice(0, 8)}</td>
-          <td>${s.project}</td>
+          <td class="sid">${escHtml(s.session_id.slice(0, 8))}</td>
+          <td>${escHtml(s.project)}</td>
           <td class="model-${mk}">${mk}</td>
           <td>${fmtTime(s.last_activity)}</td>
         </tr>`;
       }).join('');
     }
     panel.classList.remove('hidden');
+    clearError('Active sessions');
   } catch (e) {
-    console.error('Active sessions error:', e);
+    showError('Active sessions', e);
   }
 });
 
@@ -830,15 +903,11 @@ document.getElementById('active-close').addEventListener('click', () => {
   document.getElementById('active-panel').classList.add('hidden');
 });
 
-// ─── Tools: Settings ───
-// In-memory copy of the pricing config while the modal is open. Saving
-// reads from DOM inputs back into this object, preserving the ordered
-// entries[] array (order determines LIKE match priority).
 let editingPricing = null;
 
 function renderPricingEntries(pricing) {
   const grid = document.getElementById('pricing-grid-v2');
-  // Keep the header row (first 5 children); clear the rest.
+  // The first 5 children are the header row.
   while (grid.children.length > 5) grid.removeChild(grid.lastChild);
 
   (pricing.entries || []).forEach((entry, idx) => {
@@ -864,7 +933,6 @@ function renderPricingEntries(pricing) {
     }
   });
 
-  // Fallback row
   document.getElementById('pr-fb-input').value = pricing.fallback.input;
   document.getElementById('pr-fb-output').value = pricing.fallback.output;
   document.getElementById('pr-fb-cache-read').value = pricing.fallback.cache_read;
@@ -899,7 +967,7 @@ document.getElementById('act-settings').addEventListener('click', async () => {
     renderPricingUpdateStatus(s);
     document.getElementById('settings-modal').classList.remove('hidden');
   } catch (e) {
-    console.error('Settings error:', e);
+    showError('Settings', e);
   }
 });
 
@@ -913,37 +981,42 @@ document.getElementById('settings-modal').addEventListener('click', (e) => {
   }
 });
 
+function readPrice(el, label) {
+  const v = parseFloat(el.value);
+  if (!(v >= 0)) throw new Error(`Invalid price for ${label}`);
+  return v;
+}
+
 document.getElementById('settings-save').addEventListener('click', async () => {
   try {
-    const s = await invoke('get_settings');
-    s.cost_threshold = parseFloat(document.getElementById('set-threshold').value) || 0;
-    s.auto_update_pricing = document.getElementById('set-auto-pricing').checked;
+    const costThreshold = parseFloat(document.getElementById('set-threshold').value) || 0;
+    const autoUpdatePricing = document.getElementById('set-auto-pricing').checked;
+    let pricing = null;
 
-    // Pull per-entry pricing back from the DOM into editingPricing. Fall
-    // back to any pre-existing entry pricing when a field is blank so we
-    // don't silently zero-out a rate on a typo.
     if (editingPricing && editingPricing.entries) {
       document.querySelectorAll('#pricing-grid-v2 input[data-entry-idx]').forEach(el => {
-        const idx = parseInt(el.dataset.entryIdx, 10);
+        const entry = editingPricing.entries[parseInt(el.dataset.entryIdx, 10)];
         const field = el.dataset.field;
-        const v = parseFloat(el.value);
-        if (!isNaN(v) && editingPricing.entries[idx]) {
-          editingPricing.entries[idx].pricing[field] = v;
-        }
+        if (entry) entry.pricing[field] = readPrice(el, `${entry.label} (${field})`);
       });
-      editingPricing.fallback.input = parseFloat(document.getElementById('pr-fb-input').value) || editingPricing.fallback.input;
-      editingPricing.fallback.output = parseFloat(document.getElementById('pr-fb-output').value) || editingPricing.fallback.output;
-      editingPricing.fallback.cache_read = parseFloat(document.getElementById('pr-fb-cache-read').value) || editingPricing.fallback.cache_read;
-      editingPricing.fallback.cache_creation = parseFloat(document.getElementById('pr-fb-cache-creation').value) || editingPricing.fallback.cache_creation;
-      s.pricing = editingPricing;
+      for (const [id, field] of [
+        ['pr-fb-input', 'input'],
+        ['pr-fb-output', 'output'],
+        ['pr-fb-cache-read', 'cache_read'],
+        ['pr-fb-cache-creation', 'cache_creation'],
+      ]) {
+        editingPricing.fallback[field] = readPrice(document.getElementById(id), `fallback (${field})`);
+      }
+      pricing = editingPricing;
     }
 
-    await invoke('save_settings', { newSettings: s });
+    await invoke('save_settings', { costThreshold, autoUpdatePricing, pricing });
     document.getElementById('settings-modal').classList.add('hidden');
+    clearError('Save settings');
     resetCharts();
     loadDashboard();
   } catch (e) {
-    console.error('Save settings error:', e);
+    showError('Save settings', e);
   }
 });
 
@@ -965,7 +1038,7 @@ document.getElementById('pricing-refresh').addEventListener('click', async () =>
       loadDashboard();
     }
   } catch (e) {
-    status.textContent = `Price check failed; saved prices are unchanged. ${e}`;
+    status.textContent = `Price check failed; saved prices are unchanged. ${errorMessage(e)}`;
     status.classList.add('error');
   } finally {
     button.disabled = false;
@@ -975,28 +1048,17 @@ document.getElementById('pricing-refresh').addEventListener('click', async () =>
 
 document.getElementById('settings-reset').addEventListener('click', async () => {
   document.getElementById('set-threshold').value = '';
-  // Restore defaults by reloading the backend's canonical table. The
-  // backend normalizes on load, so re-fetching a newly-saved-empty config
-  // would also work — but that requires a round-trip. Simpler: ask for a
-  // fresh settings object with `entries: []` so normalize() repopulates.
   try {
-    const cur = await invoke('get_settings');
-    cur.pricing.entries = [];
-    await invoke('save_settings', { newSettings: cur });
+    await invoke('reset_pricing');
     const fresh = await invoke('get_settings');
     editingPricing = fresh.pricing;
     renderPricingEntries(fresh.pricing);
+    resetCharts();
+    loadDashboard();
   } catch (e) {
-    console.error('Reset pricing error:', e);
+    showError('Reset pricing', e);
   }
 });
-
-// ─── Manage Projects Modal ───
-function escHtml(s) {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
 
 async function openProjectsModal() {
   document.getElementById('tools-menu').classList.remove('open');
@@ -1037,12 +1099,11 @@ async function renderProjectsList() {
         </div>`;
     }).join('');
   } catch (e) {
-    console.error('List projects error:', e);
-    list.innerHTML = `<div class="projects-empty">Failed to load projects: ${escHtml(e)}</div>`;
+    showError('List projects', e);
+    list.innerHTML = `<div class="projects-empty">Failed to load projects: ${escHtml(errorMessage(e))}</div>`;
   }
 }
 
-// Delegated handler for per-row rename/reset buttons
 document.getElementById('projects-list').addEventListener('click', async (e) => {
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
@@ -1052,12 +1113,12 @@ document.getElementById('projects-list').addEventListener('click', async (e) => 
   if (act === 'reset') {
     try {
       await invoke('reset_project_name', { projectPath: path });
-      await renderProjectsList();
-      await loadDashboard();
     } catch (err) {
-      console.error('Reset project error:', err);
-      alert('Reset failed: ' + err);
+      showError('Reset project name', err);
+      return;
     }
+    await renderProjectsList();
+    loadDashboard();
     return;
   }
 
@@ -1066,7 +1127,6 @@ document.getElementById('projects-list').addEventListener('click', async (e) => 
     const nameWrap = row.querySelector('.project-row-name');
     const currentName = row.querySelector('.project-row-name-text').textContent;
 
-    // Swap the name text for an input — inline edit to avoid an extra modal.
     nameWrap.innerHTML = `<input class="project-rename-input" type="text" value="${escHtml(currentName)}" maxlength="80" />`;
     const input = nameWrap.querySelector('input');
     input.focus();
@@ -1080,13 +1140,11 @@ document.getElementById('projects-list').addEventListener('click', async (e) => 
       }
       try {
         await invoke('rename_project', { projectPath: path, newName });
-        await renderProjectsList();
-        await loadDashboard();
+        loadDashboard();
       } catch (err) {
-        console.error('Rename error:', err);
-        alert('Rename failed: ' + err);
-        await renderProjectsList();
+        showError('Rename project', err);
       }
+      await renderProjectsList();
     };
 
     input.addEventListener('blur', commit, { once: true });
@@ -1110,12 +1168,15 @@ document.getElementById('projects-modal').addEventListener('click', (e) => {
   }
 });
 
-// ─── About Modal ───
 document.getElementById('act-about').addEventListener('click', async () => {
   document.getElementById('tools-menu').classList.remove('open');
-  const ver = await window.__TAURI__.app.getVersion();
-  document.getElementById('about-version').textContent = 'v' + ver;
-  document.getElementById('about-modal').classList.remove('hidden');
+  try {
+    const ver = await window.__TAURI__.app.getVersion();
+    document.getElementById('about-version').textContent = 'v' + ver;
+    document.getElementById('about-modal').classList.remove('hidden');
+  } catch (e) {
+    showError('About', e);
+  }
 });
 
 document.getElementById('about-close').addEventListener('click', () => {
@@ -1128,126 +1189,138 @@ document.getElementById('about-modal').addEventListener('click', (e) => {
   }
 });
 
-// ─── Cost Alert ───
-listen('cost-alert', e => {
-  const amount = e.payload;
-  document.getElementById('cost-alert-text').textContent = `Daily cost threshold exceeded: ${fmtCost(amount)}`;
-  document.getElementById('cost-alert').classList.remove('hidden');
-});
-
 document.getElementById('cost-alert-close').addEventListener('click', () => {
   document.getElementById('cost-alert').classList.add('hidden');
 });
 
-// ─── Window Position Persistence ───
+const appWindow = getCurrentWindow();
 let posTimer = null;
+
 function saveWindowPos() {
   clearTimeout(posTimer);
   posTimer = setTimeout(async () => {
     try {
-      const win = getCurrentWindow();
-      const pos = await win.outerPosition();
-      const size = await win.outerSize();
+      // A minimized Windows window reports (-32000, -32000); persisting that restores it off-screen.
+      if (await appWindow.isMinimized()) return;
+      const pos = await appWindow.outerPosition();
+      const size = await appWindow.outerSize();
       await invoke('save_window_position', {
         x: pos.x, y: pos.y,
         width: size.width, height: size.height,
       });
-    } catch (e) { /* ignore */ }
+      clearError('Window position');
+    } catch (e) {
+      showError('Window position', e);
+    }
   }, 500);
 }
 
-// Debounced save on move/resize
-const appWindow = getCurrentWindow();
-appWindow.onMoved(saveWindowPos);
-appWindow.onResized(saveWindowPos);
+appWindow.onMoved(saveWindowPos).catch(e => showError('Window events', e));
+appWindow.onResized(saveWindowPos).catch(e => showError('Window events', e));
 
-// ─── Auto-Refresh ───
+let pollingScan = false;
+
 setInterval(async () => {
   if (isScanning) {
-    // Safety net for lost scan-progress events (e.g. if the backend emits
-    // before our listener attaches, or if Tauri drops an event under load).
-    // Pull the cached snapshot every second so the loader never stalls.
+    if (pollingScan) return;
+    pollingScan = true;
     try {
-      const snapshot = await invoke('get_scan_progress');
-      if (snapshot) {
-        showScanProgress(snapshot);
+      // Safety net for scan-progress events emitted before the listener attached.
+      if (await invoke('is_scanning')) {
+        const snapshot = await invoke('get_scan_progress');
+        if (snapshot) showScanProgress(snapshot);
       } else {
-        // Backend cleared the snapshot — scan finished.
         isScanning = false;
-        document.getElementById('scan-overlay').classList.add('hidden');
-        document.getElementById('live-dot').classList.remove('scanning');
+        hideScanOverlay();
         loadDashboard();
       }
-    } catch (_) { /* ignore */ }
+      clearError('Scan progress');
+    } catch (e) {
+      showError('Scan progress', e);
+    } finally {
+      pollingScan = false;
+    }
     return;
   }
-  refreshCountdown--;
+  refreshCountdown = Math.max(0, refreshCountdown - 1);
   document.getElementById('refresh-countdown').textContent = refreshCountdown + 's';
-  if (refreshCountdown <= 0) {
-    loadDashboard();
-    refreshCountdown = 30;
-  }
 }, 1000);
 
-// ─── Events ───
-listen('scan-progress', e => {
+function on(event, handler) {
+  listen(event, handler).catch(e => showError('Event ' + event, e));
+}
+
+on('cost-alert', e => {
+  document.getElementById('cost-alert-text').textContent = `Daily cost threshold exceeded: ${fmtCost(e.payload)}`;
+  document.getElementById('cost-alert').classList.remove('hidden');
+});
+
+on('scan-progress', e => {
   isScanning = true;
   showScanProgress(e.payload);
 });
 
-listen('scan-complete', () => {
+on('scan-problems', e => {
+  const problems = e.payload;
+  const shown = problems.slice(0, 3).join('; ');
+  const more = problems.length > 3 ? ` (+${problems.length - 3} more)` : '';
+  showError('Scan', shown + more);
+});
+
+on('scan-complete', () => {
   isScanning = false;
-  document.getElementById('scan-overlay').classList.add('hidden');
-  document.getElementById('live-dot').classList.remove('scanning');
+  hideScanOverlay();
   loadDashboard();
 });
 
-listen('refresh-tick', () => {
+on('refresh-tick', () => {
   if (!isScanning) {
     loadDashboard();
     refreshCountdown = 30;
   }
 });
 
-listen('pricing-updated', () => {
+on('pricing-updated', () => {
   resetCharts();
   loadDashboard();
 });
 
-// ─── Init ───
-// Show the loader synchronously — before we await anything — so the user
-// always sees progress UI during the startup scan. The prior flow let the
-// window paint blank while `invoke('is_scanning')` was in flight and dropped
-// early `scan-progress` events that fired before the listener attached.
-forceShowLoader();
-
-(async () => {
-  isScanning = await invoke('is_scanning');
-  if (isScanning) {
-    // Backfill: the scanner may have emitted `discovering` before this
-    // listener was attached. Pull the latest progress snapshot from the
-    // backend cache so the overlay reflects reality instead of sticking
-    // on "Discovering..." forever.
-    try {
-      const snapshot = await invoke('get_scan_progress');
-      if (snapshot) showScanProgress(snapshot);
-    } catch (_) { /* older backend without command — ignore */ }
-  } else {
-    // Scan already finished while we were initializing — hide the loader.
-    document.getElementById('scan-overlay').classList.add('hidden');
-    document.getElementById('live-dot').classList.remove('scanning');
-    loadDashboard();
-  }
-
-  // Load account tier
+async function loadTier() {
   try {
     const tier = await invoke('get_account_tier');
-    if (tier.rate_limit_tier && tier.rate_limit_tier !== 'unknown') {
+    if (tier && tier.rate_limit_tier) {
       const label = tier.rate_limit_tier
         .replace('default_', '')
         .replace(/_/g, ' ');
       document.getElementById('tier-badge').textContent = label;
       document.getElementById('tier-group').style.display = '';
     }
-  } catch (e) { /* no credentials file */ }
+  } catch (e) {
+    showError('Account tier', e);
+  }
+}
+
+forceShowLoader();
+
+(async () => {
+  try {
+    isScanning = await invoke('is_scanning');
+  } catch (e) {
+    isScanning = false;
+    showError('Scan status', e);
+  }
+
+  if (isScanning) {
+    try {
+      const snapshot = await invoke('get_scan_progress');
+      if (snapshot) showScanProgress(snapshot);
+    } catch (e) {
+      showError('Scan progress', e);
+    }
+  } else {
+    hideScanOverlay();
+    loadDashboard();
+  }
+
+  loadTier();
 })();

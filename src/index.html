@@ -4,9 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TokenScope</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/fonts.css" />
   <link rel="stylesheet" href="css/styles.css" />
 </head>
 <body>
@@ -35,6 +33,8 @@
     <span id="cost-alert-text">Daily cost threshold exceeded!</span>
     <button id="cost-alert-close" class="alert-close">&times;</button>
   </div>
+
+  <div id="error-toasts" class="error-toasts" role="alert" aria-live="assertive"></div>
 
   <!-- Settings Modal -->
   <div id="settings-modal" class="modal-overlay hidden">
@@ -95,7 +95,7 @@
         <button id="projects-close" class="modal-close">&times;</button>
       </div>
       <div class="modal-body">
-        <p class="projects-hint">Rename a project to give it a friendlier label. The underlying folder isn't moved — only the display name in TokenScope changes. Renames persist across rescans.</p>
+        <p class="projects-hint">Rename a project to give it a friendlier label. The underlying folder isn't moved – only the display name in TokenScope changes. Renames persist across rescans.</p>
         <div class="projects-list" id="projects-list">
           <div class="projects-empty">Loading projects...</div>
         </div>
@@ -446,7 +446,7 @@
           </div>
           <div class="compo-note">
             Text/tool tokens estimated from JSONL chars (~4 chars/tok); thinking is the residual
-            vs. API <code>output_tokens</code>. Thinking text itself isn't logged — only the signature.
+            vs. API <code>output_tokens</code>. Thinking text itself isn't logged – only the signature.
           </div>
           <div class="compo-subline">
             <span id="compo-thinking-turns">--</span> of <span id="compo-total-turns">--</span> turns used extended thinking

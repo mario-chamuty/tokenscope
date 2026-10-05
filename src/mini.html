@@ -3,9 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>TokenScope</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/fonts.css" />
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -231,6 +229,33 @@
     .layout-compact .c-close:active,
     .layout-expanded .e-close:active { color: #e8eaf0; }
 
+    .mini-error {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 4px 0 10px;
+      background: #10131b;
+      color: #f87171;
+      font-size: 10px;
+      line-height: 1.3;
+      overflow: hidden;
+      cursor: default;
+      -webkit-app-region: no-drag;
+    }
+    .mini-error-text { flex: 1; min-width: 0; max-height: 100%; overflow: hidden; overflow-wrap: anywhere; }
+    .mini-error-close {
+      flex-shrink: 0;
+      background: none;
+      border: none;
+      color: #f87171;
+      font-size: 16px;
+      padding: 6px 8px;
+      cursor: pointer;
+    }
+
     .hidden { display: none !important; }
 
   </style>
@@ -301,6 +326,11 @@
       <span class="e-active-label">Turns</span>
       <span class="e-active-val v-sess" id="e-sess-turns">--</span>
     </div>
+  </div>
+
+  <div id="mini-error" class="mini-error hidden" role="alert">
+    <span id="mini-error-text" class="mini-error-text"></span>
+    <button id="mini-error-close" class="mini-error-close" type="button">&times;</button>
   </div>
 
   <script src="js/mini.js"></script>
