@@ -817,7 +817,7 @@ mod tests {
     impl TempDir {
         fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!(
-                "tokscope-test-{tag}-{}-{}",
+                "tokenscope-test-{tag}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

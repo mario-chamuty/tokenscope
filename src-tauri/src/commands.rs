@@ -501,7 +501,7 @@ pub async fn export_csv(
         std::fs::create_dir_all(&output_dir)
             .map_err(|e| format!("Cannot create {}: {e}", output_dir.display()))?;
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let csv_path = output_dir.join(format!("tokscope_export_{timestamp}.csv"));
+        let csv_path = output_dir.join(format!("tokenscope_export_{timestamp}.csv"));
         db.export_csv(since.as_deref(), &models, &csv_path)?;
         Ok(csv_path.to_string_lossy().to_string())
     })

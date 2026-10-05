@@ -102,7 +102,7 @@ fn migrate_if_needed(
         });
         // Old transcripts are deleted by Claude Code, so this database is the only
         // copy of that history; keep an untouched copy of it before collapsing rows.
-        let backup = app_data.join("tokscope.db.pre-v6.bak");
+        let backup = app_data.join("tokenscope.db.pre-v6.bak");
         if !backup.exists() {
             db.backup_to(&backup)?;
         }
@@ -116,6 +116,31 @@ fn migrate_if_needed(
         );
     }
     db.meta_set("data_schema_version", &DATA_SCHEMA_VERSION.to_string())
+}
+
+/// 1.4.0 shipped under the identifier `com.versiontwo.tokscope`; copy its data
+/// into the current app data directory once. The old directory is left untouched.
+fn import_legacy_data(app_data: &std::path::Path) -> Result<(), String> {
+    let Some(parent) = app_data.parent() else {
+        return Ok(());
+    };
+    let legacy = parent.join("com.versiontwo.tokscope");
+    if !legacy.is_dir() || app_data.join("tokenscope.db").exists() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(&legacy)
+        .map_err(|e| format!("Cannot read {}: {e}", legacy.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Cannot read {}: {e}", legacy.display()))?;
+        if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().replacen("tokscope", "tokenscope", 1);
+        let target = app_data.join(&name);
+        std::fs::copy(entry.path(), &target)
+            .map_err(|e| format!("Cannot copy {} to {}: {e}", entry.path().display(), target.display()))?;
+    }
+    Ok(())
 }
 
 fn tray_tooltip(db: &Database, config_dir: &std::path::Path) -> Result<String, String> {
@@ -137,7 +162,8 @@ pub fn run() {
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data)?;
-            let db_path = app_data.join("tokscope.db");
+            import_legacy_data(&app_data)?;
+            let db_path = app_data.join("tokenscope.db");
             let db = Arc::new(Database::new(db_path)?);
 
             let scanning = Arc::new(AtomicBool::new(true));

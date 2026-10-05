@@ -412,8 +412,8 @@ pub fn generate_pdf(
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(output_dir).map_err(|e| e.to_string())?;
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-    let pdf_path = output_dir.join(format!("tokscope_report_{}.pdf", ts));
-    let html_path = output_dir.join(format!("tokscope_report_{}.html", ts));
+    let pdf_path = output_dir.join(format!("tokenscope_report_{}.pdf", ts));
+    let html_path = output_dir.join(format!("tokenscope_report_{}.html", ts));
 
     let html = build_report_html(db, since, pricing)?;
     std::fs::write(&html_path, &html).map_err(|e| e.to_string())?;

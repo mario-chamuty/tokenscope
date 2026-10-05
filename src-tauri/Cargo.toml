@@ -1,5 +1,5 @@
 [package]
-name = "tokscope"
+name = "tokenscope"
 version = "1.4.0"
 description = "AI Coding Token Usage Dashboard"
 authors = ["Version Two s.r.o. <info@versiontwo.sk>"]
@@ -7,7 +7,7 @@ homepage = "https://www.versiontwo.sk"
 edition = "2021"
 
 [lib]
-name = "tokscope_lib"
+name = "tokenscope_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

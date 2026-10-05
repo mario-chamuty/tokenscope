@@ -1357,7 +1357,7 @@ mod tests {
     impl TempDb {
         fn open(tag: &str) -> (Self, Database) {
             let path = std::env::temp_dir().join(format!(
-                "tokscope-db-{tag}-{}-{}.db",
+                "tokenscope-db-{tag}-{}-{}.db",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

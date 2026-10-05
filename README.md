@@ -30,8 +30,8 @@ The installers are not code-signed. Windows SmartScreen and macOS Gatekeeper wil
 
 ## Data
 
-- Database and settings: the app data directory for `com.versiontwo.tokscope`.
-- Schema v6 keys turns by Claude's `message.id`. Upgrading from an older version backs up the database next to it (`tokscope.db.pre-v6.bak`, safe to delete once the numbers look right) and corrects the previously inflated token and cost totals.
+- Database and settings: the app data directory for `sk.versiontwo.tokenscope`. Data from 1.4.0 (`com.versiontwo.tokscope`) is copied over on first launch.
+- Schema v6 keys turns by Claude's `message.id`. Upgrading from an older version backs up the database next to it (`tokenscope.db.pre-v6.bak`, safe to delete once the numbers look right) and corrects the previously inflated token and cost totals.
 
 ## License
 
