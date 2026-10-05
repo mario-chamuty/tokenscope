@@ -1,6 +1,6 @@
 [package]
 name = "tokenscope"
-version = "1.4.0"
+version = "1.4.1"
 description = "AI Coding Token Usage Dashboard"
 authors = ["Version Two s.r.o. <info@versiontwo.sk>"]
 homepage = "https://www.versiontwo.sk"
