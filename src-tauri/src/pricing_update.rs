@@ -25,7 +25,10 @@ pub struct PricingRefreshResult {
 /// retry interval has elapsed. `None` means automatic updates are disabled or
 /// a check is not due yet.
 pub fn refresh_if_due(config_dir: &Path) -> Option<Result<PricingRefreshResult, String>> {
-    let current = settings::load(config_dir);
+    let current = match settings::load(config_dir) {
+        Ok(s) => s,
+        Err(e) => return Some(Err(e)),
+    };
     if !current.auto_update_pricing || !is_due(&current, Utc::now()) {
         return None;
     }
@@ -58,11 +61,11 @@ pub fn refresh(config_dir: &Path) -> Result<PricingRefreshResult, String> {
             })
         }
         Err(error) => {
-            // Record the failure without touching the last known-good table.
-            let _ = settings::update(config_dir, |app_settings| {
+            settings::update(config_dir, |app_settings| {
                 app_settings.pricing_last_checked = Some(checked_at);
                 app_settings.pricing_update_error = Some(error.clone());
-            });
+            })
+            .map_err(|e| format!("{error}; the failure could not be recorded: {e}"))?;
             Err(error)
         }
     }
@@ -103,7 +106,10 @@ fn fetch_entries() -> Result<Vec<ModelPriceEntry>, String> {
     let response = client
         .get(PRICING_SOURCE_URL)
         .header(ACCEPT, "text/markdown")
-        .header(USER_AGENT, "TokenScope/1.3 (+https://www.versiontwo.sk)")
+        .header(
+            USER_AGENT,
+            concat!("TokenScope/", env!("CARGO_PKG_VERSION"), " (+https://www.versiontwo.sk)"),
+        )
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|error| format!("Official pricing request failed: {error}"))?;
@@ -249,6 +255,9 @@ fn merge_entries(current: &[ModelPriceEntry], fetched: &[ModelPriceEntry]) -> Ve
             .filter(|entry| !fetched_ids.contains(entry.id.as_str()))
             .cloned(),
     );
+    // First LIKE match wins, so `%opus-4-8%` must precede `%opus-4%` and `%opus%`
+    // whatever order the upstream table or older entries arrive in.
+    merged.sort_by_key(|entry| std::cmp::Reverse(entry.pattern.len()));
     merged
 }
 
@@ -396,5 +405,25 @@ mod tests {
         }];
         let merged = merge_entries(&current, &fetched);
         assert!(merged.iter().any(|entry| entry.id == "opus-3"));
+    }
+
+    #[test]
+    fn merge_orders_specific_patterns_before_generic_ones() {
+        let entry = |id: &str, pattern: &str| ModelPriceEntry {
+            id: id.into(),
+            label: id.into(),
+            pattern: pattern.into(),
+            pricing: ModelPricing::default(),
+            effective_from: None,
+            effective_until: None,
+        };
+        let current = vec![entry("opus", "%opus%"), entry("opus-4", "%opus-4%")];
+        let mut fetched = parse_entries(SAMPLE).unwrap();
+        fetched.push(entry("opus-4-1", "%opus-4-1%"));
+        let merged = merge_entries(&current, &fetched);
+        let position = |id: &str| merged.iter().position(|e| e.id == id).unwrap();
+        assert!(position("opus-4-8") < position("opus-4"));
+        assert!(position("opus-4-1") < position("opus-4"));
+        assert!(position("opus-4") < position("opus"));
     }
 }

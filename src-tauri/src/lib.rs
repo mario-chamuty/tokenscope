@@ -5,6 +5,7 @@ mod pricing_update;
 mod report;
 mod scanner;
 mod settings;
+mod timeutil;
 
 use commands::{AppState, ProgressHandle};
 use db::Database;
@@ -72,24 +73,72 @@ pub fn ensure_main_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow
         .ok()
 }
 
-/// Data-schema version for the advanced-stats pipeline. Bumping forces a
-/// background full rescan on first launch so older databases pick up
-/// content-block extraction and the `subject` column.
-pub const DATA_SCHEMA_VERSION: u32 = 5;
+/// Data-schema version. Version 6 keys turns by `message.id` instead of by
+/// JSONL line (see `Database::migrate_to_v6`). Bumping it runs the migration
+/// for older databases on first launch.
+pub const DATA_SCHEMA_VERSION: u32 = 6;
+
+fn migrate_if_needed(
+    db: &Database,
+    app_data: &std::path::Path,
+    on_progress: &dyn Fn(scanner::ScanProgress),
+) -> Result<(), String> {
+    let stored = match db.meta_get("data_schema_version")? {
+        Some(v) => v
+            .parse::<u32>()
+            .map_err(|e| format!("Invalid data_schema_version {v:?}: {e}"))?,
+        None => 0,
+    };
+    if stored >= DATA_SCHEMA_VERSION {
+        return Ok(());
+    }
+    if stored < 6 && db.turn_count()? > 0 {
+        on_progress(scanner::ScanProgress {
+            phase: "migrating".into(),
+            current: 0,
+            total: 0,
+            current_project: String::new(),
+            turns_found: 0,
+        });
+        // Old transcripts are deleted by Claude Code, so this database is the only
+        // copy of that history; keep an untouched copy of it before collapsing rows.
+        let backup = app_data.join("tokscope.db.pre-v6.bak");
+        if !backup.exists() {
+            db.backup_to(&backup)?;
+        }
+        let report = scanner::migrate_legacy_turns(db)?;
+        eprintln!(
+            "Schema v6 migration: {} -> {} turns ({} rebuilt from transcripts, {} legacy rows collapsed)",
+            report.turns_before,
+            report.turns_after,
+            report.rows_replaced_by_rescan,
+            report.legacy_rows_collapsed
+        );
+    }
+    db.meta_set("data_schema_version", &DATA_SCHEMA_VERSION.to_string())
+}
+
+fn tray_tooltip(db: &Database, config_dir: &std::path::Path) -> Result<String, String> {
+    let s = settings::load(config_dir)?;
+    let stats = db.get_mini_stats(&s.pricing)?;
+    Ok(format!(
+        "TokenScope\nCost: ${:.2}\nTokens: {}\nSessions: {}\nAll-time: ${:.2}",
+        stats.today_cost,
+        fmt_tokens(stats.today_tokens),
+        stats.today_sessions,
+        stats.total_cost
+    ))
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // Initialize database
-            let app_data = app
-                .path()
-                .app_data_dir()
-                .expect("Failed to get app data dir");
-            std::fs::create_dir_all(&app_data).ok();
+            let app_data = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&app_data)?;
             let db_path = app_data.join("tokscope.db");
-            let db = Arc::new(Database::new(db_path).expect("Failed to init database"));
+            let db = Arc::new(Database::new(db_path)?);
 
             let scanning = Arc::new(AtomicBool::new(true));
             let last_progress: Arc<std::sync::Mutex<Option<scanner::ScanProgress>>> =
@@ -101,51 +150,18 @@ pub fn run() {
                     turns_found: 0,
                 })));
 
-            // Auto-upgrade: if the stored data-schema version is older than
-            // the current build, wipe scan_state + tool_calls + breakdown
-            // columns so the initial scan re-extracts everything. Without
-            // this, users who upgrade from a pre-advanced-stats build keep
-            // a mostly-empty Advanced panel because the scanner's byte-offset
-            // cache short-circuits every unchanged file.
-            let stored_schema = db
-                .meta_get("data_schema_version")
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(0);
-            if stored_schema < DATA_SCHEMA_VERSION {
-                db.wipe_scan_and_breakdown();
-                db.meta_set("data_schema_version", &DATA_SCHEMA_VERSION.to_string());
-            }
+            let migrate_dir = app_data.clone();
+            commands::spawn_scan(
+                app.handle().clone(),
+                db.clone(),
+                scanning.clone(),
+                last_progress.clone(),
+                move |db, on_progress| {
+                    migrate_if_needed(db, &migrate_dir, on_progress)?;
+                    scanner::scan_all_with_progress(db, on_progress)
+                },
+            );
 
-            // Initial scan with progress events
-            let scan_db = db.clone();
-            let scan_handle = app.handle().clone();
-            let scan_flag = scanning.clone();
-            let scan_last_progress = last_progress.clone();
-            std::thread::spawn(move || {
-                let result = scanner::scan_all_with_progress(&scan_db, |progress| {
-                    // Cache the latest snapshot so late-attaching webview
-                    // listeners can still see current progress via
-                    // `get_scan_progress`.
-                    if let Ok(mut g) = scan_last_progress.lock() {
-                        *g = Some(progress.clone());
-                    }
-                    scan_handle.emit("scan-progress", progress).ok();
-                });
-                match result {
-                    Ok(r) => eprintln!(
-                        "Initial scan: {} turns from {} files",
-                        r.total_turns, r.files_scanned
-                    ),
-                    Err(e) => eprintln!("Scan error: {}", e),
-                }
-                scan_flag.store(false, Ordering::Relaxed);
-                if let Ok(mut g) = scan_last_progress.lock() {
-                    *g = None;
-                }
-                scan_handle.emit("scan-complete", ()).ok();
-            });
-
-            // Store state
             app.manage(AppState {
                 db: db.clone(),
                 scanning: scanning.clone(),
@@ -154,8 +170,8 @@ pub fn run() {
             app.manage(ProgressHandle(last_progress));
 
             // Check the official Claude pricing table in the background. A
-            // successful check is cached for 24 hours; failures retain the
-            // last known-good prices and retry after 6 hours.
+            // successful check is cached for 24 hours; a failed one is recorded
+            // in the settings and retried after 6 hours.
             let pricing_config = app_data.clone();
             let pricing_handle = app.handle().clone();
             std::thread::spawn(move || loop {
@@ -184,7 +200,10 @@ pub fn run() {
             // disconnected a secondary display since last run, the saved coords may
             // point into the void.
             let saved = settings::load(&app_data);
-            if let Some(w) = app.get_webview_window("main") {
+            if let Err(e) = &saved {
+                eprintln!("Window position not restored: {e}");
+            }
+            if let (Some(w), Ok(saved)) = (app.get_webview_window("main"), saved) {
                 let wp = &saved.window_position;
                 if wp.width > 0.0 && wp.height > 0.0 {
                     let monitors = w.available_monitors().unwrap_or_default();
@@ -222,8 +241,13 @@ pub fn run() {
             // Save window position on move/resize
             let pos_config = app_data.clone();
             app.listen("save-window-pos", move |event| {
-                if let Ok(pos) = serde_json::from_str::<settings::WindowPosition>(event.payload()) {
-                    settings::update(&pos_config, |s| s.window_position = pos).ok();
+                match serde_json::from_str::<settings::WindowPosition>(event.payload()) {
+                    Ok(pos) => {
+                        if let Err(e) = settings::update(&pos_config, |s| s.window_position = pos) {
+                            eprintln!("Window position not saved: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("Invalid window position payload: {e}"),
                 }
             });
 
@@ -258,7 +282,7 @@ pub fn run() {
             let tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .menu_on_left_click(false)
+                .show_menu_on_left_click(false)
                 .tooltip("TokenScope - Loading stats...")
                 .on_menu_event(|app, event| {
                     match event.id().as_ref() {
@@ -316,56 +340,57 @@ pub fn run() {
                 while refresh_flag.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
-                // Update tooltip immediately after initial scan
-                {
-                    let s = settings::load(&alert_config);
-                    let stats = refresh_db.get_mini_stats(&s.pricing);
-                    let tooltip = format!(
-                        "TokenScope\nCost: ${:.2}\nTokens: {}\nSessions: {}\nAll-time: ${:.2}",
-                        stats.today_cost,
-                        fmt_tokens(stats.today_tokens),
-                        stats.today_sessions,
-                        stats.total_cost
-                    );
-                    tray_ref.set_tooltip(Some(&tooltip)).ok();
+                match tray_tooltip(&refresh_db, &alert_config) {
+                    Ok(t) => {
+                        if let Err(e) = tray_ref.set_tooltip(Some(&t)) {
+                            eprintln!("Tray tooltip not updated: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("Tray tooltip not updated: {e}"),
                 }
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(30));
                     if refresh_flag
-                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
-                        .is_ok()
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_err()
                     {
-                        match scanner::scan_all(&refresh_db) {
-                            Ok(_) => {
-                                app_handle.emit("refresh-tick", ()).ok();
+                        continue;
+                    }
+                    let scan = scanner::scan_all(&refresh_db);
+                    refresh_flag.store(false, Ordering::SeqCst);
+                    match scan {
+                        Ok(r) => commands::emit_scan_problems(&app_handle, r.problems),
+                        Err(e) => commands::emit_scan_problems(&app_handle, vec![e]),
+                    }
+                    app_handle.emit("refresh-tick", ()).ok();
+
+                    match tray_tooltip(&refresh_db, &alert_config) {
+                        Ok(t) => {
+                            if let Err(e) = tray_ref.set_tooltip(Some(&t)) {
+                                eprintln!("Tray tooltip not updated: {e}");
                             }
-                            Err(e) => eprintln!("Refresh scan error: {}", e),
                         }
-                        refresh_flag.store(false, Ordering::Relaxed);
+                        Err(e) => eprintln!("Tray tooltip not updated: {e}"),
+                    }
 
-                        let s = settings::load(&alert_config);
-
-                        // Update tray tooltip with stats
-                        let stats = refresh_db.get_mini_stats(&s.pricing);
-                        let tooltip = format!(
-                            "TokenScope\nCost: ${:.2}\nTokens: {}\nSessions: {}\nAll-time: ${:.2}",
-                            stats.today_cost,
-                            fmt_tokens(stats.today_tokens),
-                            stats.today_sessions,
-                            stats.total_cost
-                        );
-                        tray_ref.set_tooltip(Some(&tooltip)).ok();
-
-                        // Check cost threshold
-                        if s.cost_threshold > 0.0 {
-                            let today_cost = refresh_db.get_today_cost(&s.pricing);
-                            if today_cost >= s.cost_threshold && !last_alert {
+                    let alert = settings::load(&alert_config).and_then(|s| {
+                        if s.cost_threshold <= 0.0 {
+                            return Ok(None);
+                        }
+                        let today = refresh_db.get_today_cost(&s.pricing)?;
+                        Ok(Some((today, s.cost_threshold)))
+                    });
+                    match alert {
+                        Ok(Some((today_cost, threshold))) => {
+                            if today_cost >= threshold && !last_alert {
                                 app_handle.emit("cost-alert", today_cost).ok();
                                 last_alert = true;
-                            } else if today_cost < s.cost_threshold {
+                            } else if today_cost < threshold {
                                 last_alert = false;
                             }
                         }
+                        Ok(None) => {}
+                        Err(e) => eprintln!("Cost alert check failed: {e}"),
                     }
                 }
             });
@@ -389,6 +414,8 @@ pub fn run() {
             commands::is_scanning,
             commands::get_settings,
             commands::save_settings,
+            commands::reset_pricing,
+            commands::set_mini_layout,
             commands::refresh_pricing,
             commands::generate_report,
             commands::export_csv,

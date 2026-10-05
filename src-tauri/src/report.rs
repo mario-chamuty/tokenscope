@@ -1,5 +1,4 @@
-use crate::db::Database;
-use crate::models::AdvancedStats;
+use crate::db::{build_time_filter, Database};
 use crate::settings::{build_cost_case, build_cost_expr, PricingConfig};
 use std::path::PathBuf;
 
@@ -28,10 +27,10 @@ pub fn generate_markdown(
     std::fs::create_dir_all(output_dir).map_err(|e| e.to_string())?;
     let report_path = output_dir.join("token_report.md");
 
-    let adv = db.get_advanced_stats(since, &[], None, pricing);
+    let adv = db.get_advanced_stats(since, &[], None, pricing)?;
 
-    let conn = db.conn.lock().unwrap();
-    let tf = time_filter(since);
+    let conn = db.read_connection()?;
+    let tf = build_time_filter(since, "t")?;
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let range_label = since.unwrap_or("All time");
 
@@ -42,7 +41,7 @@ pub fn generate_markdown(
     ));
 
     // Grand totals
-    let (sessions, turns, inp, cc, cr, outp) = query_totals(&conn, &tf);
+    let (sessions, turns, inp, cc, cr, outp) = query_totals(&conn, &tf)?;
     let total = inp + cc + cr + outp;
     out.push("## Grand Totals\n".into());
     out.push(format!(
@@ -270,7 +269,7 @@ pub fn generate_markdown(
     out.push("## By Model\n".into());
     out.push("| Model | Turns | Input | Cache Create | Cache Read | Output | Total |".into());
     out.push("|-------|-------|-------|--------------|------------|--------|-------|".into());
-    for (model, turns, inp, cc, cr, outp) in query_by_model(&conn, &tf) {
+    for (model, turns, inp, cc, cr, outp) in query_by_model(&conn, &tf)? {
         let t = inp + cc + cr + outp;
         out.push(format!(
             "| {} | {} | {} | {} | {} | {} | {} |",
@@ -295,7 +294,7 @@ pub fn generate_markdown(
         "|---------|----------|-------|-------|--------|------------|--------------|-------|"
             .into(),
     );
-    for (proj, sess, turns, inp, outp, cr, cc) in query_by_project(&conn, &tf) {
+    for (proj, sess, turns, inp, outp, cr, cc) in query_by_project(&conn, &tf)? {
         let t = inp + outp + cr + cc;
         out.push(format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} |",
@@ -314,7 +313,7 @@ pub fn generate_markdown(
     // ── Top sessions ────────────────────────────────────────────────
     out.push("## Top 25 Costliest Sessions\n".into());
     for (i, (sid, proj, model, start, end, turns, inp, outp, cr, cc, cost)) in
-        query_top_sessions(&conn, &tf, pricing).iter().enumerate()
+        query_top_sessions(&conn, &tf, pricing)?.iter().enumerate()
     {
         let total = inp + outp + cr + cc;
         let s = if start.len() >= 19 {
@@ -351,11 +350,60 @@ pub fn generate_markdown(
     Ok(report_path)
 }
 
-/// Generate a real PDF file. Builds rich HTML with all advanced-stats
-/// sections, then shells out to a headless browser (msedge first, chrome
-/// second) with `--print-to-pdf` to produce the actual .pdf. If neither
-/// is found, falls back to writing the HTML and returning its path so
-/// the user still gets *something* plus a clear error.
+/// Removes the throw-away browser profile on every exit path.
+struct TempProfile(PathBuf);
+
+impl Drop for TempProfile {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+const PDF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Runs the browser with its own profile directory: without one, Edge/Chrome
+/// hand the job to an already running instance and exit without printing.
+fn run_print_to_pdf(
+    browser: &std::path::Path,
+    headless_flag: &str,
+    profile: &std::path::Path,
+    pdf_path: &std::path::Path,
+    file_url: &str,
+) -> Result<std::process::ExitStatus, String> {
+    let name = browser.to_string_lossy();
+    let mut child = std::process::Command::new(browser)
+        .args([
+            headless_flag,
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-pdf-header-footer",
+            &format!("--user-data-dir={}", profile.to_string_lossy()),
+            &format!("--print-to-pdf={}", pdf_path.to_string_lossy()),
+            file_url,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to launch {name}: {e}"))?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if started.elapsed() > PDF_TIMEOUT => {
+                child.kill().ok();
+                child.wait().ok();
+                return Err(format!("{name} did not finish rendering the PDF in time"));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(e) => return Err(format!("Failed to wait for {name}: {e}")),
+        }
+    }
+}
+
+/// Generate a real PDF file. Builds HTML with all advanced-stats sections,
+/// then renders it with a headless browser (Edge first, Chrome second) via
+/// `--print-to-pdf`. Without a browser this fails; the HTML stays in the
+/// reports folder.
 pub fn generate_pdf(
     db: &Database,
     output_dir: &PathBuf,
@@ -367,55 +415,30 @@ pub fn generate_pdf(
     let pdf_path = output_dir.join(format!("tokscope_report_{}.pdf", ts));
     let html_path = output_dir.join(format!("tokscope_report_{}.html", ts));
 
-    let html = build_report_html(db, since, pricing);
+    let html = build_report_html(db, since, pricing)?;
     std::fs::write(&html_path, &html).map_err(|e| e.to_string())?;
 
     let browser = find_headless_browser().ok_or_else(|| {
-        "Could not find Microsoft Edge or Google Chrome for PDF rendering. \
-                        Install Edge (pre-installed on Windows 10/11) or Chrome and try again. \
-                        HTML fallback saved as a .html file in the reports folder."
-            .to_string()
+        format!(
+            "Could not find Microsoft Edge or Google Chrome for PDF rendering. \
+             Install one of them and try again. The HTML report was saved to {}.",
+            html_path.display()
+        )
     })?;
 
+    let profile = TempProfile(output_dir.join(format!("browser-profile-{ts}")));
     let file_url = format!("file:///{}", html_path.to_string_lossy().replace('\\', "/"));
-    let status = std::process::Command::new(&browser)
-        .args([
-            "--headless=new",
-            "--disable-gpu",
-            "--no-pdf-header-footer",
-            &format!("--print-to-pdf={}", pdf_path.to_string_lossy()),
-            &file_url,
-        ])
-        .status()
-        .map_err(|e| format!("Failed to launch {}: {}", browser.to_string_lossy(), e))?;
-
+    let status = run_print_to_pdf(&browser, "--headless=new", &profile.0, &pdf_path, &file_url)?;
     if !status.success() {
-        // Retry without the `=new` headless flag (older Edge/Chrome).
-        let status2 = std::process::Command::new(&browser)
-            .args([
-                "--headless",
-                "--disable-gpu",
-                &format!("--print-to-pdf={}", pdf_path.to_string_lossy()),
-                &file_url,
-            ])
-            .status()
-            .map_err(|e| e.to_string())?;
-        if !status2.success() {
-            return Err(format!(
-                "{} exited with {:?} while generating PDF",
-                browser.to_string_lossy(),
-                status.code()
-            ));
-        }
+        return Err(format!(
+            "{} exited with {:?} while generating the PDF",
+            browser.to_string_lossy(),
+            status.code()
+        ));
     }
-
     if !pdf_path.exists() {
         return Err("Headless browser returned success but did not produce a PDF".to_string());
     }
-
-    // Keep the HTML around too – useful for debugging layout. If you
-    // prefer to clean it up, uncomment the next line.
-    // let _ = std::fs::remove_file(&html_path);
 
     Ok(pdf_path)
 }
@@ -455,18 +478,22 @@ fn find_headless_browser() -> Option<PathBuf> {
 /// Build the HTML document that is either saved as-is or rendered to PDF.
 /// Uses a print-oriented stylesheet (no onclick buttons, no web fonts) so
 /// Chromium's `--print-to-pdf` produces a clean, paginated document.
-fn build_report_html(db: &Database, since: Option<&str>, pricing: &PricingConfig) -> String {
-    let adv = db.get_advanced_stats(since, &[], None, pricing);
+fn build_report_html(
+    db: &Database,
+    since: Option<&str>,
+    pricing: &PricingConfig,
+) -> Result<String, String> {
+    let adv = db.get_advanced_stats(since, &[], None, pricing)?;
 
-    let conn = db.conn.lock().unwrap();
-    let tf = time_filter(since);
+    let conn = db.read_connection()?;
+    let tf = build_time_filter(since, "t")?;
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let range_label = since.unwrap_or("All time");
 
-    let (sessions, turns, inp, cc, cr, outp) = query_totals(&conn, &tf);
-    let models = query_by_model(&conn, &tf);
-    let projects = query_by_project(&conn, &tf);
-    let top_sessions = query_top_sessions(&conn, &tf, pricing);
+    let (sessions, turns, inp, cc, cr, outp) = query_totals(&conn, &tf)?;
+    let models = query_by_model(&conn, &tf)?;
+    let projects = query_by_project(&conn, &tf)?;
+    let top_sessions = query_top_sessions(&conn, &tf, pricing)?;
 
     let cost_expr = build_cost_expr(pricing);
     let cost: f64 = conn
@@ -475,7 +502,7 @@ fn build_report_html(db: &Database, since: Option<&str>, pricing: &PricingConfig
             [],
             |r| r.get(0),
         )
-        .unwrap_or(0.0);
+        .map_err(|e| format!("Database error: {e}"))?;
 
     let text_est = est_tokens(adv.text_chars);
     let tool_est = est_tokens(adv.tool_input_chars);
@@ -751,7 +778,7 @@ td{{padding:3pt 6pt;border-bottom:1px solid #ddd;color:#222}}
     }
     h.push_str("</table></body></html>");
 
-    h
+    Ok(h)
 }
 
 fn bar_row(label: &str, color: &str, value: i64, total: i64) -> String {
@@ -781,16 +808,14 @@ fn md_escape(s: &str) -> String {
     s.replace('|', "\\|").replace('`', "\\`")
 }
 
-// ─── Query helpers ───
-
-fn time_filter(since: Option<&str>) -> String {
-    match since {
-        Some(s) => format!("AND t.timestamp >= '{}'", s),
-        None => String::new(),
-    }
+fn db_err(e: rusqlite::Error) -> String {
+    format!("Database error: {e}")
 }
 
-fn query_totals(conn: &rusqlite::Connection, tf: &str) -> (i64, i64, i64, i64, i64, i64) {
+fn query_totals(
+    conn: &rusqlite::Connection,
+    tf: &str,
+) -> Result<(i64, i64, i64, i64, i64, i64), String> {
     conn.query_row(
         &format!(
             "SELECT COUNT(DISTINCT t.session_id), COUNT(*),
@@ -811,64 +836,63 @@ fn query_totals(conn: &rusqlite::Connection, tf: &str) -> (i64, i64, i64, i64, i
             ))
         },
     )
-    .unwrap_or((0, 0, 0, 0, 0, 0))
+    .map_err(db_err)
 }
 
-fn query_by_model(conn: &rusqlite::Connection, tf: &str) -> Vec<(String, i64, i64, i64, i64, i64)> {
+fn query_by_model(
+    conn: &rusqlite::Connection,
+    tf: &str,
+) -> Result<Vec<(String, i64, i64, i64, i64, i64)>, String> {
     let mut stmt = conn
         .prepare(&format!(
         "SELECT model, COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(cache_creation),0),
             COALESCE(SUM(cache_read),0), COALESCE(SUM(output_tokens),0)
         FROM turns t WHERE 1=1 {} GROUP BY model ORDER BY 3 DESC", tf
     ))
-        .unwrap();
-    stmt.query_map([], |r| {
-        Ok((
-            r.get(0)?,
-            r.get(1)?,
-            r.get(2)?,
-            r.get(3)?,
-            r.get(4)?,
-            r.get(5)?,
-        ))
-    })
-    .unwrap()
-    .filter_map(|r| r.ok())
-    .collect()
+        .map_err(db_err)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .map_err(db_err)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
 }
 
 fn query_by_project(
     conn: &rusqlite::Connection,
     tf: &str,
-) -> Vec<(String, i64, i64, i64, i64, i64, i64)> {
+) -> Result<Vec<(String, i64, i64, i64, i64, i64, i64)>, String> {
     let mut stmt = conn.prepare(&format!(
         "SELECT s.project, COUNT(DISTINCT t.session_id), COUNT(*),
             COALESCE(SUM(t.input_tokens),0), COALESCE(SUM(t.output_tokens),0),
             COALESCE(SUM(t.cache_read),0), COALESCE(SUM(t.cache_creation),0)
         FROM turns t JOIN sessions s ON t.session_id = s.id
         WHERE 1=1 {} GROUP BY s.project ORDER BY SUM(t.input_tokens+t.output_tokens+t.cache_read+t.cache_creation) DESC", tf
-    )).unwrap();
-    stmt.query_map([], |r| {
-        Ok((
-            r.get(0)?,
-            r.get(1)?,
-            r.get(2)?,
-            r.get(3)?,
-            r.get(4)?,
-            r.get(5)?,
-            r.get(6)?,
-        ))
-    })
-    .unwrap()
-    .filter_map(|r| r.ok())
-    .collect()
+    )).map_err(db_err)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })
+        .map_err(db_err)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
 }
 
-fn query_top_sessions(
-    conn: &rusqlite::Connection,
-    tf: &str,
-    pricing: &PricingConfig,
-) -> Vec<(
+type TopSession = (
     String,
     String,
     String,
@@ -880,11 +904,19 @@ fn query_top_sessions(
     i64,
     i64,
     f64,
-)> {
+);
+
+fn query_top_sessions(
+    conn: &rusqlite::Connection,
+    tf: &str,
+    pricing: &PricingConfig,
+) -> Result<Vec<TopSession>, String> {
     let cost_expr = build_cost_case(pricing, Some("t"));
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT t.session_id, s.project, t.model, MIN(t.timestamp), MAX(t.timestamp),
+            "SELECT t.session_id, s.project,
+            (SELECT model FROM turns WHERE session_id = t.session_id ORDER BY timestamp DESC LIMIT 1),
+            MIN(t.timestamp), MAX(t.timestamp),
             COUNT(*), COALESCE(SUM(t.input_tokens),0), COALESCE(SUM(t.output_tokens),0),
             COALESCE(SUM(t.cache_read),0), COALESCE(SUM(t.cache_creation),0),
             COALESCE(SUM({}),0) as cost
@@ -892,25 +924,25 @@ fn query_top_sessions(
         WHERE 1=1 {} GROUP BY t.session_id ORDER BY cost DESC LIMIT 25",
             cost_expr, tf
         ))
-        .unwrap();
-    stmt.query_map([], |r| {
-        Ok((
-            r.get(0)?,
-            r.get(1)?,
-            r.get(2)?,
-            r.get(3)?,
-            r.get(4)?,
-            r.get(5)?,
-            r.get(6)?,
-            r.get(7)?,
-            r.get(8)?,
-            r.get(9)?,
-            r.get(10)?,
-        ))
-    })
-    .unwrap()
-    .filter_map(|r| r.ok())
-    .collect()
+        .map_err(db_err)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+            ))
+        })
+        .map_err(db_err)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
 }
 
 fn fnum(n: i64) -> String {
@@ -924,8 +956,3 @@ fn fnum(n: i64) -> String {
         format!("{}", n)
     }
 }
-
-// Silence unused-import warnings when only part of the module is used
-// in some build configurations.
-#[allow(dead_code)]
-fn _touch_adv(_: &AdvancedStats) {}

@@ -385,35 +385,34 @@ pub fn build_cost_case(p: &PricingConfig, alias: Option<&str>) -> String {
     case
 }
 
-fn load_unlocked(config_dir: &Path) -> AppSettings {
+/// A missing file means first run and yields defaults. An unreadable or
+/// corrupt file is an error: the next save would otherwise overwrite the
+/// user's settings with defaults.
+fn load_unlocked(config_dir: &Path) -> Result<AppSettings, String> {
     let path = config_dir.join("settings.json");
-    let mut s: AppSettings = if let Ok(data) = std::fs::read_to_string(&path) {
-        serde_json::from_str(&data).unwrap_or_default()
-    } else {
-        AppSettings::default()
+    let mut s: AppSettings = match std::fs::read_to_string(&path) {
+        Ok(data) => serde_json::from_str(&data)
+            .map_err(|e| format!("Corrupt settings file {}: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => AppSettings::default(),
+        Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
     };
     s.pricing.normalize();
-    s
+    Ok(s)
 }
 
 fn save_unlocked(config_dir: &Path, settings: &AppSettings) -> Result<(), String> {
     let path = config_dir.join("settings.json");
+    let tmp = config_dir.join("settings.json.tmp");
     let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    std::fs::write(&tmp, json).map_err(|e| format!("Cannot write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("Cannot replace {}: {e}", path.display()))
 }
 
-pub fn load(config_dir: &Path) -> AppSettings {
+pub fn load(config_dir: &Path) -> Result<AppSettings, String> {
     let _guard = SETTINGS_IO_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     load_unlocked(config_dir)
-}
-
-pub fn save(config_dir: &Path, settings: &AppSettings) -> Result<(), String> {
-    let _guard = SETTINGS_IO_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    save_unlocked(config_dir, settings)
 }
 
 /// Apply a read-modify-write operation while holding the settings lock. This
@@ -425,7 +424,7 @@ pub fn update<T>(
     let _guard = SETTINGS_IO_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut settings = load_unlocked(config_dir);
+    let mut settings = load_unlocked(config_dir)?;
     let result = mutate(&mut settings);
     save_unlocked(config_dir, &settings)?;
     Ok(result)

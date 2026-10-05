@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 pub struct JournalEntry {
     #[serde(rename = "type")]
     pub entry_type: Option<String>,
-    pub uuid: Option<String>,
     #[allow(dead_code)]
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
@@ -19,6 +18,9 @@ pub struct JournalEntry {
 
 #[derive(Debug, Deserialize)]
 pub struct MessagePayload {
+    /// Claude Code writes one JSONL line per content block, all sharing this id
+    /// and an identical `usage` (except `output_tokens`, which streams up).
+    pub id: Option<String>,
     #[allow(dead_code)]
     pub role: Option<String>,
     pub model: Option<String>,
